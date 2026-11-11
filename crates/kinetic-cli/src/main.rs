@@ -760,7 +760,9 @@ fn verify(file: &Path) -> Result<()> {
 }
 
 fn set_threads(threads: Option<usize>) -> Result<()> {
-    if let Some(n) = threads {
+    // Apple Silicon has efficiency cores a decode step would wait for; the
+    // default there is the performance cores, as `kinetic doctor` reports.
+    if let Some(n) = threads.or_else(system::default_threads) {
         rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .build_global()?;
