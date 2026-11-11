@@ -26,7 +26,7 @@ jobs:
           - { os: ubuntu-22.04, target: linux-x86_64, variant: cuda }
           - { os: windows-2022, target: windows-x86_64, variant: cpu }
           - { os: windows-2022, target: windows-x86_64, variant: cuda }
-          - { os: macos-14, target: macos-arm64, variant: vulkan }
+          - { os: macos-15, target: macos-arm64, variant: vulkan }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -106,7 +106,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022, macos-14]
+        os: [ubuntu-22.04, windows-2022, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
