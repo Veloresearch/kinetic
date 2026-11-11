@@ -14,6 +14,13 @@ const HOMEBREW_LOADERS: [&str; 2] = [
     "/usr/local/lib/libvulkan.dylib",
 ];
 
+/// Where Homebrew's Mesa puts the manifest of KosmicKrisp, which its loader
+/// does not search by default.
+const KOSMICKRISP_MANIFESTS: [&str; 2] = [
+    "/opt/homebrew/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json",
+    "/usr/local/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json",
+];
+
 /// The Vulkan loader, opened at runtime, and one instance of it.
 pub struct Instance {
     /// Keeps the loader library open while the instance's functions are used.
@@ -26,6 +33,19 @@ impl Instance {
     /// `libvulkan.dylib`) and creates an instance. Fails with [`Error::LoaderNotFound`] when no
     /// Vulkan driver is installed.
     pub fn new() -> Result<Rc<Instance>> {
+        // The loader reads its environment when an instance is created, so
+        // KosmicKrisp is added before that, unless the user chose drivers.
+        if cfg!(target_os = "macos")
+            && std::env::var_os("VK_DRIVER_FILES").is_none()
+            && std::env::var_os("VK_ADD_DRIVER_FILES").is_none()
+        {
+            if let Some(manifest) = KOSMICKRISP_MANIFESTS
+                .iter()
+                .find(|m| std::path::Path::new(m).exists())
+            {
+                std::env::set_var("VK_ADD_DRIVER_FILES", manifest);
+            }
+        }
         // SAFETY: loading the loader runs its initialisation, which has no
         // preconditions; the library stays loaded while `entry` lives.
         let entry = unsafe { ash::Entry::load() }
@@ -67,7 +87,15 @@ impl Instance {
             .into_iter()
             .map(|pd| PhysicalDevice::query(self, pd))
             .collect::<Result<Vec<_>>>()?;
-        devices.sort_by_key(|d| d.info().kind.preference());
+        // On a Mac one GPU appears once per driver; KosmicKrisp is the
+        // faster of the two on Metal.
+        devices.sort_by_key(|d| {
+            let info = d.info();
+            (
+                info.kind.preference(),
+                !info.driver_name.contains("KosmicKrisp"),
+            )
+        });
         Ok(devices)
     }
 }

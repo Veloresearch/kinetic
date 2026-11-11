@@ -19,7 +19,7 @@ current user: into `%LOCALAPPDATA%\Programs\kinetic`, put on the user `PATH`, on
 Windows, and into `~/.local/bin` on Linux and macOS. `-Version 0.1.0` /
 `--version 0.1.0` picks a release and `-Cpu` / `--cpu` the smaller CPU-only
 build. macOS has one build, which uses the GPU when a Vulkan driver is
-installed (`brew install molten-vk vulkan-loader`).
+installed (`brew install vulkan-loader mesa`).
 
 ## Release binaries
 

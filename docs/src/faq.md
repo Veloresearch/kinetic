@@ -6,7 +6,7 @@
 AVX2, or on Apple Silicon. An NVIDIA GPU makes it faster.
 
 **Does it run on macOS, or on ARM?** On Apple Silicon Macs, yes, on the CPU
-and, with a Vulkan driver installed (`brew install molten-vk vulkan-loader`),
+and, with a Vulkan driver installed (`brew install vulkan-loader mesa`),
 on the GPU; Intel Macs and other ARM machines are not supported. Kinetic supports
 Windows and Linux on x86-64 and macOS on Apple Silicon.
 

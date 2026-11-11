@@ -717,8 +717,8 @@ more architectures are coming. Other models run on the CPU on those machines.
 
 Yes, on Apple Silicon. On the CPU the quantized kernels use NEON and the
 SDOT instruction. The GPU runs through Vulkan on Metal: install a driver
-with `brew install molten-vk vulkan-loader` and `kinetic doctor` lists the
-GPU. Intel Macs are not supported.
+with `brew install vulkan-loader mesa` (KosmicKrisp, the faster one) or
+`brew install vulkan-loader molten-vk`, and `kinetic doctor` lists the GPU. Intel Macs are not supported.
 
 </details>
 
