@@ -52,8 +52,12 @@ pub struct Features {
     pub subgroup_size_range: (u32, u32),
     /// Subgroup reductions such as `subgroupAdd` in compute shaders.
     pub subgroup_arithmetic: bool,
-    /// Compute pipelines can require a subgroup size of 32.
+    /// Compute pipelines run with full subgroups of 32: either they can
+    /// require that size, or it is the only size the device has.
     pub subgroup_size_32: bool,
+    /// Compute pipelines can require a subgroup size. Without it (the
+    /// Vulkan drivers on Metal) the size is the device's own.
+    pub subgroup_size_required: bool,
     /// Packed int8 dot products (`VK_KHR_shader_integer_dot_product`).
     pub integer_dot_product: bool,
     /// The driver reports packed signed int8 dot products as hardware-accelerated.
@@ -196,12 +200,15 @@ impl PhysicalDevice {
                 && p11
                     .subgroup_supported_operations
                     .contains(vk::SubgroupFeatureFlags::ARITHMETIC);
+            features.subgroup_size_required = p13
+                .required_subgroup_size_stages
+                .contains(vk::ShaderStageFlags::COMPUTE)
+                && (p13.min_subgroup_size..=p13.max_subgroup_size).contains(&SUBGROUP);
+            // A pipeline that neither requires a size nor allows a varying
+            // one runs at the device's default size.
             features.subgroup_size_32 = f13.subgroup_size_control == vk::TRUE
                 && f13.compute_full_subgroups == vk::TRUE
-                && p13
-                    .required_subgroup_size_stages
-                    .contains(vk::ShaderStageFlags::COMPUTE)
-                && (p13.min_subgroup_size..=p13.max_subgroup_size).contains(&SUBGROUP);
+                && (features.subgroup_size_required || p11.subgroup_size == SUBGROUP);
             features.integer_dot_product = f13.shader_integer_dot_product == vk::TRUE;
             features.integer_dot_product_accelerated =
                 p13.integer_dot_product4x8_bit_packed_signed_accelerated == vk::TRUE;
