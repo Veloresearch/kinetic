@@ -6,6 +6,14 @@ the rules in [Versioning](https://veloresearch.github.io/kinetic/versioning.html
 
 ## [Unreleased]
 
+### Platforms
+
+- macOS on Apple Silicon, on the CPU: NEON kernels with SDOT for the
+  K-quants, Q8_0 and Q4_0, f16 and bf16 weights, activation quantization
+  and the chunked delta rule; `kinetic doctor` reports the machine; the
+  default thread count is the performance cores. A `macos-arm64-cpu`
+  archive and a Python wheel are built for every release.
+
 ### Models
 
 - Gemma 4 (`gemma4`) on the CPU and CUDA, with images through its `gemma4v`

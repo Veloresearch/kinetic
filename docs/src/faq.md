@@ -3,10 +3,11 @@
 ## Questions
 
 **Do I need a GPU?** No. Kinetic is built to be fast on an ordinary CPU with
-AVX2. An NVIDIA GPU makes it faster.
+AVX2, or on Apple Silicon. An NVIDIA GPU makes it faster.
 
-**Does it run on macOS, or on ARM?** No. Kinetic supports Windows and Linux
-on x86-64.
+**Does it run on macOS, or on ARM?** On Apple Silicon Macs, yes, on the CPU;
+Intel Macs and other ARM machines are not supported. Kinetic supports
+Windows and Linux on x86-64 and macOS on Apple Silicon.
 
 **Is the output really the same with all the speed-ups?** Yes. Greedy
 decoding gives the same tokens as plain decoding, and sampling with a seed
@@ -25,7 +26,7 @@ never download anything, and there is no telemetry and no update check.
 
 **What does Kinetic store on my disk?** Only Warm Start's prompt states, in
 `kinetic/warm` under your cache directory (`%LOCALAPPDATA%` on Windows,
-`~/.cache` on Linux), up to 2 GiB. They are derived from your prompts, so
+`~/.cache` on Linux and macOS), up to 2 GiB. They are derived from your prompts, so
 treat them like your chat history. Delete the folder to clear them, or run
 with `--no-prompt-cache` to keep nothing.
 
