@@ -50,7 +50,7 @@ Ryzen; Kinetic detects them at runtime. Without them it still runs, on a
 much slower path.
 
 On Apple Silicon the kernels use NEON and the SDOT instruction, which every
-M-series chip has. The GPU is not used yet.
+M-series chip has.
 
 `-t` sets the number of threads; by default Kinetic uses every logical CPU,
 except on macOS, where it uses the performance cores: a step that waits for

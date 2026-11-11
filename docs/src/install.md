@@ -18,7 +18,8 @@ GPUs through CUDA, on AMD and Intel GPUs through Vulkan and on the CPU), check i
 current user: into `%LOCALAPPDATA%\Programs\kinetic`, put on the user `PATH`, on
 Windows, and into `~/.local/bin` on Linux and macOS. `-Version 0.1.0` /
 `--version 0.1.0` picks a release and `-Cpu` / `--cpu` the smaller CPU-only
-build (the only build on macOS).
+build. macOS has one build, which uses the GPU when a Vulkan driver is
+installed (`brew install molten-vk vulkan-loader`).
 
 ## Release binaries
 
@@ -31,7 +32,7 @@ take the archive for your system:
 | `kinetic-<version>-windows-x86_64-cpu.zip` | Windows, CPU only |
 | `kinetic-<version>-linux-x86_64-cuda.tar.gz` | Linux, with NVIDIA GPU support |
 | `kinetic-<version>-linux-x86_64-cpu.tar.gz` | Linux, CPU only |
-| `kinetic-<version>-macos-arm64-cpu.tar.gz` | macOS on Apple Silicon, CPU only |
+| `kinetic-<version>-macos-arm64-vulkan.tar.gz` | macOS on Apple Silicon, GPU through Vulkan and CPU |
 
 The `cuda` archives also run on machines without a GPU, on the CPU; they are
 the right choice unless you want the smallest download. They need only the

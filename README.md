@@ -113,7 +113,7 @@ tar xzf kinetic-0.1.0-linux-x86_64-cuda.tar.gz
 |---|---|
 | `...-x86_64-cuda` | NVIDIA through CUDA, any GPU through Vulkan, the CPU |
 | `...-x86_64-cpu` | the CPU only, the smallest download |
-| `...-macos-arm64-cpu` | Apple Silicon Macs, on the CPU |
+| `...-macos-arm64-vulkan` | Apple Silicon Macs: the GPU through Vulkan on Metal, the CPU |
 
 Take a `cuda` archive even if you are not sure you have a GPU: it starts on
 any machine and falls back to the CPU. It needs only the graphics driver,
@@ -544,10 +544,10 @@ checks every hash and the signature. Format: [FORMAT.md](crates/kinetic-ktc/FORM
 
 | | CPU | NVIDIA (CUDA) | Vulkan |
 |---|---|---|---|
-| Hardware | x86-64 with AVX2, Apple Silicon | RTX 20, GTX 16, newer | AMD, Intel, NVIDIA |
+| Hardware | x86-64 with AVX2, Apple Silicon | RTX 20, GTX 16, newer | AMD, Intel, NVIDIA, Apple |
 | Models | all | all text models | Llama, Qwen, LFM3 |
 | Bigger than the GPU | | layer split, MoE offload | coming |
-| Needs | nothing | the NVIDIA driver | the graphics driver |
+| Needs | nothing | the NVIDIA driver | the graphics driver; on macOS MoltenVK or KosmicKrisp |
 
 Vulkan runs Llama, Qwen2.5, Qwen3, Qwen3.5 and LFM3 today. `--device auto`
 (the default) tries CUDA, then Vulkan, then the CPU, and prints one line
@@ -715,10 +715,10 @@ more architectures are coming. Other models run on the CPU on those machines.
 <details>
 <summary><b>Does it run on a Mac?</b></summary>
 
-Yes, on Apple Silicon, on the CPU: the quantized kernels use NEON and the
-SDOT instruction, and `kinetic doctor` reports them. Intel Macs are not
-supported. The GPU is not used yet; a Metal backend is on the
-[roadmap](docs/roadmap.md).
+Yes, on Apple Silicon. On the CPU the quantized kernels use NEON and the
+SDOT instruction. The GPU runs through Vulkan on Metal: install a driver
+with `brew install molten-vk vulkan-loader` and `kinetic doctor` lists the
+GPU. Intel Macs are not supported.
 
 </details>
 

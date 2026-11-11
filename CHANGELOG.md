@@ -11,8 +11,17 @@ the rules in [Versioning](https://veloresearch.github.io/kinetic/versioning.html
 - macOS on Apple Silicon, on the CPU: NEON kernels with SDOT for the
   K-quants, Q8_0 and Q4_0, f16 and bf16 weights, activation quantization
   and the chunked delta rule; `kinetic doctor` reports the machine; the
-  default thread count is the performance cores. A `macos-arm64-cpu`
-  archive and a Python wheel are built for every release.
+  default thread count is the performance cores.
+- The GPU of Apple Silicon Macs, through Vulkan on Metal (MoltenVK or
+  KosmicKrisp): Kinetic opts into portability drivers, finds Homebrew's
+  loader, and accepts devices whose subgroups are 32 wide without being
+  asked. A `macos-arm64-vulkan` archive and a Python wheel are built for every
+  release.
+
+### Fixed
+
+- Vulkan: a recorded command graph kept resetting a timestamp query pool
+  that had been destroyed with its recording. Drivers on Metal crashed on it.
 
 ### Models
 

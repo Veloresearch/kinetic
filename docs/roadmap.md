@@ -41,5 +41,4 @@ changes to the command line or the server API that break existing use.
 - Tools to convert and sign `.ktc` files from the command line.
 
 Kinetic supports Windows and Linux on x86-64 and macOS on Apple Silicon, where
-it runs on the CPU. A Metal backend for the GPU of Apple Silicon Macs is
-planned; Intel Macs are not.
+the GPU runs through a Vulkan driver on Metal. Intel Macs are not planned.
