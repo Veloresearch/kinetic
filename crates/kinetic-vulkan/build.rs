@@ -12,11 +12,11 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 /// (kernel, constants, source parts in order).
 const KERNELS: &[(&str, &str, &[&str])] = &[
-    ("gemv_f32", "", &["gemv", "gemv_f32", "gemv_dots"]),
-    ("gemv_f16", "", &["gemv", "gemv_f16", "gemv_dots"]),
-    ("gemv_q8_0", "", &["gemv", "gemv_q8_0", "gemv_dots"]),
+    ("gemv_f32", "", &["gemv", "gemv_f32"]),
+    ("gemv_f16", "", &["gemv", "gemv_f16"]),
+    ("gemv_q8_0", "", &["gemv", "gemv_q8_0"]),
     ("gemv_q4_k", "", &["gemv", "k4", "gemv_q4_k"]),
-    ("gemv_q5_k", "", &["gemv", "k4", "gemv_q5_k", "gemv_dots"]),
+    ("gemv_q5_k", "", &["gemv", "k4", "gemv_q5_k"]),
     ("gemv_q6_k", "", &["gemv", "gemv_q6_k"]),
     ("quantize_q8", "", &["quantize_q8"]),
     ("read_sum", "", &["read_sum"]),
@@ -41,6 +41,34 @@ const KERNELS: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
+/// Kernels that take one part more on Metal, whose GEMV kernels are
+/// written differently: there an invocation takes a tile of four rows and
+/// the block sums are floats, which is faster on a Mac's GPU and slower on
+/// the others. A part with a file in `shaders/metal` is read from there.
+#[cfg(feature = "metal")]
+const METAL_PARTS: &[(&str, &str)] = &[
+    ("gemv_f32", "gemv_dots"),
+    ("gemv_f16", "gemv_dots"),
+    ("gemv_q8_0", "gemv_dots"),
+    ("gemv_q5_k", "gemv_dots"),
+];
+
+/// The source of a kernel: its constants, then its parts from `dirs`, the
+/// first that has each.
+fn source(constants: &str, parts: &[&str], dirs: &[&str]) -> String {
+    std::iter::once(constants.to_string())
+        .chain(parts.iter().map(|part| {
+            let path = dirs
+                .iter()
+                .map(|dir| format!("{dir}/{part}.wgsl"))
+                .find(|path| fs::exists(path).unwrap_or(false))
+                .unwrap_or_else(|| panic!("no shader part {part}"));
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
+        }))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=shaders");
     println!("cargo:rustc-check-cfg=cfg(metal_driver)");
@@ -51,18 +79,15 @@ fn main() {
     }
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
     for &(name, constants, parts) in KERNELS {
-        let source: String = std::iter::once(constants.to_string())
-            .chain(parts.iter().map(|part| {
-                let path = format!("shaders/{part}.wgsl");
-                fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
-            }))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (module, info) = parse(name, &source);
+        let (module, info) = parse(name, &source(constants, parts, &["shaders"]));
         fs::write(out.join(format!("{name}.spv")), spirv(name, &module, &info))
             .expect("write SPIR-V");
         #[cfg(feature = "metal")]
         if metal {
+            let mut parts = parts.to_vec();
+            parts.extend(METAL_PARTS.iter().filter(|p| p.0 == name).map(|p| p.1));
+            let source = source(constants, &parts, &["shaders/metal", "shaders"]);
+            let (module, info) = parse(name, &source);
             fs::write(out.join(format!("{name}.metal")), msl(name, &module, &info))
                 .expect("write Metal source");
         }
