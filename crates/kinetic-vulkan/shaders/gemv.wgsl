@@ -1,5 +1,7 @@
 // Shared part of every GEMV kernel; build.rs appends one weight format to it,
-// which defines `LANES` and `block_dot`.
+// which defines `LANES` and `dots`: one invocation's share of a weight block
+// for the first `m` of four input blocks (`gemv_dots.wgsl` builds it from a
+// format's `block_dot`).
 //
 // y = W x for some rows x of the input, with one subgroup of 32 invocations
 // per row of W (the host pins the subgroup size). `LANES` consecutive
@@ -60,53 +62,32 @@ fn main(
     let n = shape.blocks_per_row;
     let step = 32u / LANES;
     let out = shape.offset + row;
-    var t = 0u;
-    // four tokens at a time share each weight load; every token's sum runs
-    // in the same order as alone, so batching never changes a result
-    for (; t + 4u <= count; t += 4u) {
+    // Up to four tokens at a time share each weight load. One token alone
+    // takes the same path with `m` = 1, so every token's sum runs through
+    // the same code in the same order and batching never changes a result.
+    for (var t = 0u; t < count; t += 4u) {
+        let m = min(4u, count - t);
         let xb = (start + t) * n;
         let xs = vec4<u32>(xb, xb + n, xb + 2u * n, xb + 3u * n);
         var sum = vec4<f32>(0.0);
         var b = lane / LANES;
+        // two blocks per step keep two weight loads in flight
         for (; b + step < n; b += 2u * step) {
-            sum += dot4(total, first + b, xs + b, part) + dot4(total, first + b + step, xs + b + step, part);
+            sum += dots(total, first + b, xs + b, part, m)
+                + dots(total, first + b + step, xs + b + step, part, m);
         }
         if b < n {
-            sum += dot4(total, first + b, xs + b, part);
+            sum += dots(total, first + b, xs + b, part, m);
         }
-        let all = vec4<f32>(subgroupAdd(sum.x), subgroupAdd(sum.y), subgroupAdd(sum.z), subgroupAdd(sum.w));
-        if lane == 0u {
-            for (var j = 0u; j < 4u; j++) {
-                y[(t + j) * shape.stride + out] = all[j];
+        // `m` is the same for the whole subgroup, so the reductions stay in
+        // uniform control flow; a lone token pays for one, not four.
+        for (var i = 0u; i < m; i++) {
+            let all = subgroupAdd(sum[i]);
+            if lane == 0u {
+                y[(t + i) * shape.stride + out] = all;
             }
         }
     }
-    for (; t < count; t++) {
-        let xb = (start + t) * n;
-        var sum = 0.0;
-        var b = lane / LANES;
-        // two blocks per step keep two weight loads in flight
-        for (; b + step < n; b += 2u * step) {
-            sum += block_dot(total, first + b, xb + b, part)
-                + block_dot(total, first + b + step, xb + b + step, part);
-        }
-        if b < n {
-            sum += block_dot(total, first + b, xb + b, part);
-        }
-        sum = subgroupAdd(sum);
-        if lane == 0u {
-            y[t * shape.stride + out] = sum;
-        }
-    }
-}
-
-fn dot4(total: u32, blk: u32, xs: vec4<u32>, part: u32) -> vec4<f32> {
-    return vec4<f32>(
-        block_dot(total, blk, xs.x, part),
-        block_dot(total, blk, xs.y, part),
-        block_dot(total, blk, xs.z, part),
-        block_dot(total, blk, xs.w, part),
-    );
 }
 
 // Four signed int8 dot products of 16 values.

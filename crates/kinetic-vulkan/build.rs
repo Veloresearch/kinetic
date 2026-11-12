@@ -12,11 +12,11 @@ use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 /// (kernel, constants, source parts in order).
 const KERNELS: &[(&str, &str, &[&str])] = &[
-    ("gemv_f32", "", &["gemv", "gemv_f32"]),
-    ("gemv_f16", "", &["gemv", "gemv_f16"]),
-    ("gemv_q8_0", "", &["gemv", "gemv_q8_0"]),
+    ("gemv_f32", "", &["gemv", "gemv_f32", "gemv_dots"]),
+    ("gemv_f16", "", &["gemv", "gemv_f16", "gemv_dots"]),
+    ("gemv_q8_0", "", &["gemv", "gemv_q8_0", "gemv_dots"]),
     ("gemv_q4_k", "", &["gemv", "k4", "gemv_q4_k"]),
-    ("gemv_q5_k", "", &["gemv", "k4", "gemv_q5_k"]),
+    ("gemv_q5_k", "", &["gemv", "k4", "gemv_q5_k", "gemv_dots"]),
     ("gemv_q6_k", "", &["gemv", "gemv_q6_k"]),
     ("quantize_q8", "", &["quantize_q8"]),
     ("read_sum", "", &["read_sum"]),
