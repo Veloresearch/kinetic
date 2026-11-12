@@ -43,6 +43,12 @@ const KERNELS: &[(&str, &str, &[&str])] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=shaders");
+    println!("cargo:rustc-check-cfg=cfg(metal_driver)");
+    let metal =
+        cfg!(feature = "metal") && env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos");
+    if metal {
+        println!("cargo:rustc-cfg=metal_driver");
+    }
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
     for &(name, constants, parts) in KERNELS {
         let source: String = std::iter::once(constants.to_string())
@@ -52,11 +58,18 @@ fn main() {
             }))
             .collect::<Vec<_>>()
             .join("\n");
-        fs::write(out.join(format!("{name}.spv")), compile(name, &source)).expect("write SPIR-V");
+        let (module, info) = parse(name, &source);
+        fs::write(out.join(format!("{name}.spv")), spirv(name, &module, &info))
+            .expect("write SPIR-V");
+        #[cfg(feature = "metal")]
+        if metal {
+            fs::write(out.join(format!("{name}.metal")), msl(name, &module, &info))
+                .expect("write Metal source");
+        }
     }
 }
 
-fn compile(name: &str, source: &str) -> Vec<u8> {
+fn parse(name: &str, source: &str) -> (naga::Module, naga::valid::ModuleInfo) {
     let module = naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|e| panic!("{name}:\n{}", e.emit_to_string(source)));
     let info = Validator::new(
@@ -65,6 +78,66 @@ fn compile(name: &str, source: &str) -> Vec<u8> {
     )
     .validate(&module)
     .unwrap_or_else(|e| panic!("{name}:\n{}", e.emit_to_string(source)));
+    (module, info)
+}
+
+/// The kernel as a Metal shader. Storage buffer `i` of set 0 is Metal
+/// buffer `i`; the push constants follow them, then the sizes naga wants
+/// for runtime arrays, which `src/metal/commands.rs` binds in that order.
+///
+/// Metal wants the size of each block of workgroup memory when a kernel is
+/// dispatched, so the first line lists them, in the order the entry point
+/// takes them, for `src/metal/pipeline.rs` to read back.
+#[cfg(feature = "metal")]
+fn msl(name: &str, module: &naga::Module, info: &naga::valid::ModuleInfo) -> String {
+    use naga::back::msl;
+    let bindings = module
+        .global_variables
+        .iter()
+        .filter_map(|(_, v)| v.binding.as_ref())
+        .map(|b| b.binding + 1)
+        .max()
+        .unwrap_or(0);
+    let mut resources = msl::EntryPointResources::default();
+    for binding in 0..bindings {
+        resources.resources.insert(
+            naga::ResourceBinding { group: 0, binding },
+            msl::BindTarget {
+                buffer: Some(binding as u8),
+                mutable: true,
+                ..Default::default()
+            },
+        );
+    }
+    resources.immediates_buffer = Some(bindings as u8);
+    resources.sizes_buffer = Some(bindings as u8 + 1);
+    let mut options = msl::Options {
+        lang_version: (3, 0),
+        ..Default::default()
+    };
+    options.per_entry_point_map.insert("main".into(), resources);
+    let source = msl::write_string(module, info, &options, &msl::PipelineOptions::default())
+        .unwrap_or_else(|e| panic!("{name}: {e}"))
+        .0;
+    let mut layouts = naga::proc::Layouter::default();
+    layouts
+        .update(module.to_ctx())
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    let workgroup: Vec<String> = module
+        .global_variables
+        .iter()
+        .filter(|(_, v)| v.space == naga::AddressSpace::WorkGroup)
+        // Metal takes the lengths in multiples of 16 bytes.
+        .map(|(_, v)| layouts[v.ty].size.next_multiple_of(16).to_string())
+        .collect();
+    format!("{THREADGROUP_BYTES}{}\n{source}", workgroup.join(" "))
+}
+
+/// What starts the line of workgroup memory sizes in a Metal shader.
+#[cfg(feature = "metal")]
+const THREADGROUP_BYTES: &str = "// threadgroup bytes: ";
+
+fn spirv(name: &str, module: &naga::Module, info: &naga::valid::ModuleInfo) -> Vec<u8> {
     // Vulkan 1.3 consumes SPIR-V 1.6, which has packed int8 dot products in core.
     let options = spv::Options {
         lang_version: (1, 6),
@@ -74,6 +147,6 @@ fn compile(name: &str, source: &str) -> Vec<u8> {
         ..spv::Options::default()
     };
     let words =
-        spv::write_vec(&module, &info, &options, None).unwrap_or_else(|e| panic!("{name}: {e}"));
+        spv::write_vec(module, info, &options, None).unwrap_or_else(|e| panic!("{name}: {e}"));
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }

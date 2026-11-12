@@ -25,6 +25,7 @@ pub struct Commands {
     /// Inside [`Commands::independent`]: whether a command of the group
     /// was recorded, after which the group's commands need no barrier.
     group: Option<bool>,
+    prompt: bool,
 }
 
 /// A timestamp recorded in a [`Commands`] list.
@@ -54,6 +55,7 @@ impl Commands {
             kernels: Vec::new(),
             buffers: Vec::new(),
             group: None,
+            prompt: false,
         };
         if device.info().features.timestamps {
             let info = vk::QueryPoolCreateInfo::default()
@@ -70,6 +72,20 @@ impl Commands {
             };
         }
         Ok(commands)
+    }
+
+    /// Says whether the commands recorded from here on run a full batch of
+    /// prompt tokens, whose results nobody compares with a token's alone.
+    /// A driver with a faster kernel for that may then use it; this one
+    /// has none.
+    pub fn set_prompt(&mut self, prompt: bool) {
+        self.prompt = prompt;
+    }
+
+    /// See [`Commands::set_prompt`].
+    #[allow(dead_code)]
+    pub(crate) fn prompt(&self) -> bool {
+        self.prompt
     }
 
     /// Records the device time once all earlier commands are done.
