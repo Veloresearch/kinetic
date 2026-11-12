@@ -14,6 +14,45 @@ struct Words {
     int w[4];
 };
 
+// The signed bytes 0 and 2 of v (EVEN_BYTES) or 1 and 3 (ODD_BYTES) as the
+// two sign-extended 16-bit halves of a word.
+constexpr unsigned EVEN_BYTES = 0xA280;
+constexpr unsigned ODD_BYTES = 0xB391;
+
+template <unsigned SELECT>
+__device__ __forceinline__ unsigned byte_halves(unsigned v) {
+    unsigned r;
+    asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(v), "n"(SELECT));
+    return r;
+}
+
+// c plus the products of the 16-bit halves of a and b, low with low and high
+// with high: two XMADs on Pascal, which multiplies 16-bit halves natively
+// but 32-bit integers only in several instructions.
+__device__ __forceinline__ int mad_halves(unsigned a, unsigned b, int c) {
+    int d;
+    asm("{ .reg .s16 a0, a1, b0, b1; .reg .s32 t;\n\t"
+        "mov.b32 {a0, a1}, %1;\n\t"
+        "mov.b32 {b0, b1}, %2;\n\t"
+        "mad.wide.s16 t, a0, b0, %3;\n\t"
+        "mad.wide.s16 %0, a1, b1, t; }"
+        : "=r"(d)
+        : "r"(a), "r"(b), "r"(c));
+    return d;
+}
+
+// Four signed int8 products of a and b added to c, as __dp4a. sm_60 (GP100)
+// has no dp4a instruction: there the bytes widen to 16-bit halves and
+// multiply as such, the same integers, so the same bits.
+__device__ __forceinline__ int dp4a(int a, int b, int c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 610
+    c = mad_halves(byte_halves<EVEN_BYTES>(a), byte_halves<EVEN_BYTES>(b), c);
+    return mad_halves(byte_halves<ODD_BYTES>(a), byte_halves<ODD_BYTES>(b), c);
+#else
+    return __dp4a(a, b, c);
+#endif
+}
+
 // Weights are streamed once per call; evict-first keeps the reused input
 // vector resident in L1.
 __device__ __forceinline__ Words load_weights(const void* p) {
@@ -97,7 +136,7 @@ __device__ __forceinline__ void gemv_rows(const uint8_t* w, In x, float* y, unsi
 // Four signed int8 dot products of 16 values, added to `acc`.
 __device__ __forceinline__ int dot16(const Words& a, const Words& b, int acc = 0) {
 #pragma unroll
-    for (int i = 0; i < 4; ++i) acc = __dp4a(a.w[i], b.w[i], acc);
+    for (int i = 0; i < 4; ++i) acc = dp4a(a.w[i], b.w[i], acc);
     return acc;
 }
 
