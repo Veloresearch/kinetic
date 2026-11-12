@@ -52,10 +52,15 @@ pub const MAX_BATCH: usize = 16;
 
 /// Most tokens a prompt pass runs: what the driver asks for, or
 /// [`MAX_BATCH`] if it has no kernel of its own for prompts.
-const PROMPT_BATCH: usize = match kinetic_vulkan::PROMPT_BATCH > MAX_BATCH {
-    true => kinetic_vulkan::PROMPT_BATCH,
-    false => MAX_BATCH,
-};
+const PROMPT_BATCH: usize = larger(kinetic_vulkan::PROMPT_BATCH, MAX_BATCH);
+
+const fn larger(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
 
 /// The device and its kernels.
 struct Gpu {
