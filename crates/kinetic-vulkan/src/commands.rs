@@ -74,8 +74,9 @@ impl Commands {
         Ok(commands)
     }
 
-    /// Says whether the commands recorded from here on run a full batch of
-    /// prompt tokens, whose results nobody compares with a token's alone.
+    /// Says whether the commands recorded from here on run a batch of
+    /// only prompt tokens, whose results nobody compares with a token's
+    /// alone.
     /// A driver with a faster kernel for that may then use it; this one
     /// has none.
     pub fn set_prompt(&mut self, prompt: bool) {

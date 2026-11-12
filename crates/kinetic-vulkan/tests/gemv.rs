@@ -148,23 +148,26 @@ fn check(ty: TensorType, rows: usize, cols: usize) {
 /// times its input, to what the weights' and inputs' rounding allows, at
 /// the stride and offset asked for, and the same bits on every run.
 fn check_prompt_batch(ty: TensorType, rows: usize, cols: usize) {
-    const TOKENS: usize = 16;
+    // A batch that holds 64 tokens and runs 40: a prompt kernel that takes
+    // them in groups leaves one partly filled.
+    const HELD: usize = 64;
+    const TOKENS: usize = 40;
     for gpu in gpus() {
         let mut rng = Lcg(ty as u64 + 11);
         let data = random_matrix(ty, rows, cols, &mut rng);
         let m = Matrix::new(ty, &data, rows, cols);
-        let x: Vec<f32> = (0..TOKENS * cols).map(|_| rng.f32() * 3.0).collect();
+        let x: Vec<f32> = (0..HELD * cols).map(|_| rng.f32() * 3.0).collect();
         let out = Out {
             stride: rows + 8,
             offset: 3,
         };
 
         let w = DeviceMatrix::upload(&gpu.device, &m).unwrap();
-        let mut input = GemvInput::batch(&gpu.device, cols, TOKENS).unwrap();
-        let mut batch = Batch::new(&gpu.device, TOKENS, TOKENS, 64, 0).unwrap();
+        let mut input = GemvInput::batch(&gpu.device, cols, HELD).unwrap();
+        let mut batch = Batch::new(&gpu.device, HELD, 1, 64, 0).unwrap();
         batch.set(TOKENS, 0, 0..0, None).unwrap();
         let run = |input: &mut GemvInput| {
-            let y = DeviceBuffer::new(&gpu.device, TOKENS * out.stride).unwrap();
+            let y = DeviceBuffer::new(&gpu.device, HELD * out.stride).unwrap();
             let mut commands = Commands::new(&gpu.device).unwrap();
             commands.set_prompt(true);
             batch.record_upload(&mut commands).unwrap();
@@ -177,8 +180,11 @@ fn check_prompt_batch(ty: TensorType, rows: usize, cols: usize) {
         };
         let y = run(&mut input);
         assert_eq!(
-            y.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            run(&mut input)
+            y[..TOKENS * out.stride]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            run(&mut input)[..TOKENS * out.stride]
                 .iter()
                 .map(|v| v.to_bits())
                 .collect::<Vec<_>>(),
@@ -210,17 +216,17 @@ fn check_prompt_batch(ty: TensorType, rows: usize, cols: usize) {
     }
 }
 
-// 96 rows are three tiles of a prompt kernel's 32; 3 K-quant blocks per row
-// are 768 columns, which its SIMD groups share out.
+// 128 rows are two threadgroups of a prompt kernel's 64; 3 K-quant blocks
+// per row are 768 columns, 24 of its steps.
 
 #[test]
 fn q4_k_prompt_batch_matches_reference() {
-    check_prompt_batch(TensorType::Q4K, 96, 3 * 256);
+    check_prompt_batch(TensorType::Q4K, 128, 3 * 256);
 }
 
 #[test]
 fn q6_k_prompt_batch_matches_reference() {
-    check_prompt_batch(TensorType::Q6K, 96, 3 * 256);
+    check_prompt_batch(TensorType::Q6K, 128, 3 * 256);
 }
 
 // Rows no prompt kernel tiles evenly take the exact one.

@@ -86,7 +86,7 @@ impl Kernels {
                 device,
                 "gemm_f16",
                 include_bytes!("../shaders/metal/gemm_f16.metal"),
-                3,
+                4,
                 4,
             )?,
             single: DeviceBuffer::from_slice(device, &[1, 0, 0, 1])?,

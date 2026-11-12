@@ -93,16 +93,16 @@ impl DeviceMatrix {
     }
 }
 
-/// Rows the prompt kernel's SIMD groups take at a time.
+/// Rows a threadgroup of the prompt kernel takes.
 #[cfg(metal_driver)]
-const GEMM_ROWS: usize = 32;
-/// Tokens of the batch the prompt kernel is written for.
+const GEMM_ROWS: usize = 64;
+/// Tokens a threadgroup of the prompt kernel takes; it runs them all, so
+/// a batch must hold a multiple of them.
 #[cfg(metal_driver)]
-const GEMM_TOKENS: usize = 16;
-/// Columns the prompt kernel's SIMD groups share out: eight groups, each
-/// taking eight columns at a time.
+const GEMM_TOKENS: usize = 32;
+/// Columns the prompt kernel takes at a time.
 #[cfg(metal_driver)]
-const GEMM_COLS: usize = 64;
+const GEMM_COLS: usize = 32;
 
 #[cfg(metal_driver)]
 impl DeviceMatrix {
@@ -359,24 +359,33 @@ impl Kernels {
             )));
         }
         #[cfg(metal_driver)]
-        if rows == Rows::Tokens && commands.prompt() && batch.rows() == GEMM_TOKENS {
+        if rows == Rows::Tokens && commands.prompt() && batch.rows().is_multiple_of(GEMM_TOKENS) {
             if let Some(half) = w.half()? {
-                // SAFETY: matches gemm_f16.metal: the f16 weights, x and y
-                // at buffers 0..2, then rows, columns, output stride and
-                // offset. It reads `rows * cols` weights and the 16 rows of
-                // `x` and writes 16 rows of `y`, all checked above for a
-                // batch of that size.
+                // SAFETY: matches gemm_f16.metal: the f16 weights, x, y and
+                // the batch at buffers 0..3, then rows, columns, output
+                // stride and offset. It reads `rows * cols` weights and at
+                // most every row of `x` the batch can hold, and writes as
+                // many rows of `y`, all checked above.
                 unsafe {
                     commands.dispatch(
                         &self.gemm_f16,
-                        &[half.allocation(), x.x.allocation(), y.allocation()],
+                        &[
+                            half.allocation(),
+                            x.x.allocation(),
+                            y.allocation(),
+                            batch.device().allocation(),
+                        ],
                         &[
                             w.rows as u32,
                             w.cols as u32,
                             out.stride as u32,
                             out.offset as u32,
                         ],
-                        [(w.rows / GEMM_ROWS) as u32, 1, 1],
+                        [
+                            (w.rows / GEMM_ROWS) as u32,
+                            (batch.rows() / GEMM_TOKENS) as u32,
+                            1,
+                        ],
                     )
                 };
                 return Ok(());

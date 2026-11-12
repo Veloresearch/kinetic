@@ -73,8 +73,9 @@ impl Commands {
         })
     }
 
-    /// Says whether the commands recorded from here on run a full batch of
-    /// prompt tokens, whose results nobody compares with a token's alone.
+    /// Says whether the commands recorded from here on run a batch of
+    /// only prompt tokens, whose results nobody compares with a token's
+    /// alone.
     /// The matrix products of such a batch then take the SIMD-group matrix
     /// kernel, which rounds differently from the GEMV kernels.
     pub fn set_prompt(&mut self, prompt: bool) {

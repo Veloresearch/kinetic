@@ -14,9 +14,9 @@ the rules in [Versioning](https://veloresearch.github.io/kinetic/versioning.html
   default thread count is the performance cores.
 - The GPU of Apple Silicon Macs, through Metal, with no driver to install:
   the Vulkan kernels are written out as Metal shaders at build time and a
-  Metal driver runs them (`--device metal`). Full batches of prompt tokens
-  take a kernel on Metal's SIMD-group matrices, several times faster than
-  the exact kernels and rounded differently from them; generation, drafts
+  Metal driver runs them (`--device metal`). Prompt tokens, up to 512
+  in a pass, take a kernel on Metal's SIMD-group matrices, several times
+  faster than the exact kernels and rounded differently from them; generation, drafts
   and Warm Start stay exact. A `macos-arm64-metal` archive and a Python
   wheel are built for every release.
 - Built without the `metal` feature, the Vulkan backend also runs on a Mac

@@ -1,14 +1,20 @@
-// threadgroup bytes: 16384
-// y[t][offset + r] = sum over k of w[r][k] x[t][k], for the 16 tokens of a
-// full batch and every row r of w, with Metal's SIMD-group matrices, which
-// the GPU multiplies 8x8 at a time. Hand-written: WGSL has no such type.
+// threadgroup bytes: 8192 4096
+// y[t][offset + r] = sum over k of w[r][k] x[t][k], for the tokens of a
+// prompt batch and every row r of w, with Metal's SIMD-group matrices,
+// which the GPU multiplies 8x8 at a time. Hand-written: WGSL has no such
+// type.
 //
-// A threadgroup takes 32 rows and all 16 tokens. Each of its SPLITS SIMD
-// groups takes its share of the columns: per step of eight it loads four
-// tiles of w and two of x and multiplies each pair, so a load serves
-// several products. The shares are then added in threadgroup memory.
-// Without the split a matrix of few rows would keep few SIMD groups busy
-// and most of the GPU idle.
+// A threadgroup takes 64 rows and 32 tokens. Per 32 columns its threads
+// first copy that part of w and of x to threadgroup memory, each thread a
+// run of consecutive values, laid out as the 8x8 tiles the product takes.
+// Each of the four SIMD groups then multiplies four tiles of rows by two
+// of tokens. Loading the tiles from the device's memory instead reads
+// eight rows at a time, a few values of each, and is slower.
+//
+// One pass runs as many tokens as the batch holds, and the more the
+// better: the weights are read once however many there are. Token groups
+// past the batch's count return at once; the last one may run tokens past
+// it, on whatever their rows hold, into rows nobody reads.
 //
 // The weights are f16 and the sums f32. Unlike the GEMV kernels this does
 // not give a token the sum it gets alone, so it only runs prompt batches
@@ -18,15 +24,6 @@
 #include <metal_simdgroup_matrix>
 using namespace metal;
 
-// Tiles of eight rows and of eight tokens per SIMD group. More of either
-// no longer fits the registers and runs several times slower.
-#define ROW_TILES 4
-#define TOKEN_TILES 2
-// SIMD groups of a threadgroup; `gemv.rs` checks the columns divide.
-#define SPLITS 8
-// Sums one SIMD group holds.
-#define SUMS (ROW_TILES * TOKEN_TILES * 64)
-
 struct Shape {
     uint rows;
     uint cols;
@@ -34,61 +31,75 @@ struct Shape {
     uint offset;
 };
 
-[[max_total_threads_per_threadgroup(256)]] kernel void main_(
+[[max_total_threads_per_threadgroup(128)]] kernel void main_(
     device const half *w [[buffer(0)]],
     device const float *x [[buffer(1)]],
     device float *y [[buffer(2)]],
-    constant Shape &s [[buffer(3)]],
-    threadgroup float *shares [[threadgroup(0)]],
+    device const uint *batch [[buffer(3)]],
+    constant Shape &s [[buffer(4)]],
+    threadgroup float *rows_part [[threadgroup(0)]],
+    threadgroup float *tokens_part [[threadgroup(1)]],
     uint3 group [[threadgroup_position_in_grid]],
-    uint split [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]])
+    ushort tid [[thread_index_in_threadgroup]],
+    ushort simd_group [[simdgroup_index_in_threadgroup]])
 {
-    const ulong r0 = (ulong)group.x * 8 * ROW_TILES;
-    const ulong span = s.cols / SPLITS;
-    const ulong first = split * span;
-    simdgroup_float8x8 sum[ROW_TILES][TOKEN_TILES];
-    for (int r = 0; r < ROW_TILES; r++) {
-        for (int t = 0; t < TOKEN_TILES; t++) {
-            sum[r][t] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
-        }
+    const ulong r0 = (ulong)group.x * 64;
+    const ulong t0 = (ulong)group.y * 32;
+    if (t0 >= batch[0]) {
+        return;
     }
-    simdgroup_half8x8 a[ROW_TILES];
-    simdgroup_float8x8 b[TOKEN_TILES];
-    for (ulong k = first; k < first + span; k += 8) {
-        for (int r = 0; r < ROW_TILES; r++) {
-            simdgroup_load(a[r], w, s.cols, ulong2(k, r0 + 8 * r), false);
-        }
-        // x holds a token per row; the product wants a token per column.
-        for (int t = 0; t < TOKEN_TILES; t++) {
-            simdgroup_load(b[t], x, s.cols, ulong2(k, 8 * t), true);
-        }
-        for (int r = 0; r < ROW_TILES; r++) {
-            for (int t = 0; t < TOKEN_TILES; t++) {
-                simdgroup_multiply_accumulate(sum[r][t], a[r], b[t], sum[r][t]);
+    simdgroup_float8x8 sum[8];
+    for (int i = 0; i < 8; i++) {
+        sum[i] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    }
+    // A thread copies 16 weights of one row, two per row, and 8 values of
+    // one token, four per token.
+    const ushort row = tid / 2, half_of_row = tid % 2;
+    const ushort token = tid / 4, quarter = tid % 4;
+    device const half *from_w = w + (r0 + row) * s.cols + 16 * half_of_row;
+    device const float *from_x = x + (t0 + token) * s.cols + 8 * quarter;
+    // Tiles by step of eight columns, then by eight rows or tokens; a tile
+    // holds a row or a token per eight floats.
+    threadgroup float *to_rows =
+        rows_part + (2 * half_of_row * 8 + row / 8) * 64 + (row % 8) * 8;
+    threadgroup float *to_tokens = tokens_part + (quarter * 4 + token / 8) * 64 + (token % 8) * 8;
+    // This SIMD group's half of the rows and half of the tokens.
+    threadgroup const float *my_rows = rows_part + 4 * 64 * (simd_group % 2);
+    threadgroup const float *my_tokens = tokens_part + 2 * 64 * (simd_group / 2);
+    simdgroup_float8x8 a[4];
+    simdgroup_float8x8 b[2];
+    for (uint k = 0; k < s.cols; k += 32) {
+        // Nobody still reads the last part.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        *(threadgroup packed_float4 *)(to_rows) = float4(*(device const packed_half4 *)(from_w + k));
+        *(threadgroup packed_float4 *)(to_rows + 4) =
+            float4(*(device const packed_half4 *)(from_w + k + 4));
+        *(threadgroup packed_float4 *)(to_rows + 512) =
+            float4(*(device const packed_half4 *)(from_w + k + 8));
+        *(threadgroup packed_float4 *)(to_rows + 516) =
+            float4(*(device const packed_half4 *)(from_w + k + 12));
+        *(threadgroup packed_float4 *)(to_tokens) = *(device const packed_float4 *)(from_x + k);
+        *(threadgroup packed_float4 *)(to_tokens + 4) =
+            *(device const packed_float4 *)(from_x + k + 4);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int step = 0; step < 4; step++) {
+            for (int i = 0; i < 4; i++) {
+                simdgroup_load(a[i], my_rows + step * 512 + 64 * i, 8, 0, false);
+            }
+            // A tile holds a token per row; the product wants one per
+            // column.
+            for (int i = 0; i < 2; i++) {
+                simdgroup_load(b[i], my_tokens + step * 256 + 64 * i, 8, 0, true);
+            }
+            for (int i = 0; i < 8; i++) {
+                simdgroup_multiply_accumulate(sum[i], a[i % 4], b[i / 4], sum[i]);
             }
         }
     }
-    // Tile (r, t) of this split as 64 floats, a row of the matrix per eight.
-    for (int r = 0; r < ROW_TILES; r++) {
-        for (int t = 0; t < TOKEN_TILES; t++) {
-            simdgroup_store(sum[r][t], shares + split * SUMS + (r * TOKEN_TILES + t) * 64, 8);
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (split != 0) {
-        return;
-    }
-    // The first SIMD group adds the shares, each thread its part of the
-    // sums, always in split order.
-    for (uint e = lane * (SUMS / 32); e < (lane + 1) * (SUMS / 32); e++) {
-        float total = 0.0f;
-        for (uint p = 0; p < SPLITS; p++) {
-            total += shares[p * SUMS + e];
-        }
-        const uint tile = e / 64;
-        const uint row = 8 * (tile / TOKEN_TILES) + (e % 64) / 8;
-        const uint token = 8 * (tile % TOKEN_TILES) + e % 8;
-        y[token * s.stride + s.offset + r0 + row] = total;
+    const ulong first_row = r0 + 32 * (simd_group % 2);
+    const ulong first_token = t0 + 16 * (simd_group / 2);
+    for (int i = 0; i < 8; i++) {
+        simdgroup_store(sum[i], y + s.offset, s.stride,
+                        ulong2(first_row + 8 * (i % 4), first_token + 8 * (i / 4)), true);
     }
 }
