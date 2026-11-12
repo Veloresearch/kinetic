@@ -57,7 +57,9 @@ fn tile(total: u32, blk: u32, rows_apart: u32, live: u32, b: u32, j: u32) -> vec
         let s1 = dot(vec4<f32>(unpack4xU8(h.x)) - off, v0) + dot(vec4<f32>(unpack4xU8(h.y)) - off, v1)
             + dot(vec4<f32>(unpack4xU8(h.z)) - off, v2) + dot(vec4<f32>(unpack4xU8(h.w)) - off, v3);
         let scales = w[total * 12u + at];
-        let share = sbyte(scales, sc) * d0 * s0 + sbyte(scales, sc + 4u) * d1 * s1;
+        // The fusion Metal's compiler chose for this sum, written out so
+        // that `gemv_q6_k_many.metal` can match it on any compiler.
+        let share = fma(sbyte(scales, sc) * d0, s0, sbyte(scales, sc + 4u) * d1 * s1);
         out[r] = f16_at(total * 13u, at) * share;
     }
     return out;

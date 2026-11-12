@@ -38,6 +38,8 @@ pub struct Kernels {
     #[cfg(metal_driver)]
     pub(crate) gemv_q4_k_many: Rc<Kernel>,
     #[cfg(metal_driver)]
+    pub(crate) gemv_q5_k_many: Rc<Kernel>,
+    #[cfg(metal_driver)]
     pub(crate) gemv_q6_k_many: Rc<Kernel>,
     pub(crate) gemv_q5_k: Rc<Kernel>,
     pub(crate) gemv_q6_k: Rc<Kernel>,
@@ -72,6 +74,11 @@ impl Kernels {
             gemv_q4_k_many: gemv(
                 "gemv_q4_k_many",
                 include_bytes!("../shaders/metal/gemv_q4_k_many.metal"),
+            )?,
+            #[cfg(metal_driver)]
+            gemv_q5_k_many: gemv(
+                "gemv_q5_k_many",
+                include_bytes!("../shaders/metal/gemv_q5_k_many.metal"),
             )?,
             #[cfg(metal_driver)]
             gemv_q6_k_many: gemv(

@@ -214,6 +214,13 @@ fn q6_k_prompt_pass_has_the_same_bits() {
     check_prompt_pass(TensorType::Q6K, 3, 256, 16, 1);
 }
 
+#[test]
+fn q5_k_prompt_pass_has_the_same_bits() {
+    check_prompt_pass(TensorType::Q5K, 37, 5 * 256, 32, 21);
+    check_prompt_pass(TensorType::Q5K, 128, 3 * 256, 64, 64);
+    check_prompt_pass(TensorType::Q5K, 3, 256, 16, 1);
+}
+
 // Types without a kernel for many tokens take the one they always take.
 #[test]
 fn q8_0_prompt_pass_has_the_same_bits() {

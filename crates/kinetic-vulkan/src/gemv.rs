@@ -366,6 +366,7 @@ impl Kernels {
         if many {
             match ty {
                 TensorType::Q4K => return (&self.gemv_q4_k_many, MANY_ROWS_PER_GROUP),
+                TensorType::Q5K => return (&self.gemv_q5_k_many, MANY_ROWS_PER_GROUP),
                 TensorType::Q6K => return (&self.gemv_q6_k_many, MANY_ROWS_PER_GROUP),
                 _ => {}
             }
