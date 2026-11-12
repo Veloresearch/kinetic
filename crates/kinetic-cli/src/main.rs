@@ -455,7 +455,8 @@ enum Device {
     Cpu,
     #[value(alias = "cuda0")]
     Cuda,
-    #[value(alias = "vulkan0")]
+    /// On macOS this is Metal, and `metal` names it too.
+    #[value(alias = "vulkan0", alias = "metal")]
     Vulkan,
 }
 

@@ -52,6 +52,20 @@ much slower path.
 On Apple Silicon the kernels use NEON and the SDOT instruction, which every
 M-series chip has.
 
+## Apple GPUs
+
+On a Mac, `--device metal` (or `vulkan`, the same device) runs the Vulkan
+kernels through Metal itself, with nothing to install. `auto` picks it.
+
+Full batches of prompt tokens take a kernel written for Metal's SIMD-group
+matrices, which multiplies an f16 copy of the weights and is several times
+faster than the exact kernels. It rounds differently from them, so a prompt
+processed on the GPU does not give bit for bit the state it would token by
+token; it gives the same state every time, and a warm start returns to it
+exactly. Everything after the prompt, drafts included, runs the exact
+kernels. The f16 copy takes two bytes per weight of the layers' matrices,
+2.7 GiB for LFM3 1.7B, next to the model itself.
+
 `-t` sets the number of threads; by default Kinetic uses every logical CPU,
 except on macOS, where it uses the performance cores: a step that waits for
 an efficiency core is slower than one that leaves it idle.

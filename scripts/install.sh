@@ -5,7 +5,7 @@
 # Downloads a Kinetic release from GitHub (on Linux the full build, which
 # runs on NVIDIA GPUs through CUDA, on AMD and Intel GPUs through Vulkan and
 # on the CPU; --cpu takes the smaller CPU-only build; macOS has one build,
-# for the GPU through Vulkan and the CPU), checks it against the release's SHA256SUMS and installs it into
+# for the GPU through Metal and the CPU), checks it against the release's SHA256SUMS and installs it into
 # ~/.local/bin, with its C library and header in ~/.local/lib and
 # ~/.local/include. Needs no root.
 #
@@ -72,9 +72,9 @@ fi
 version="${version#v}"
 
 # the cuda archive is the full build: CUDA, Vulkan and the CPU in one binary;
-# macOS has one build, with Vulkan and the CPU
+# macOS has one build, with Metal and the CPU
 if [ "$target" = macos-arm64 ]; then
-    variant=vulkan
+    variant=metal
 fi
 [ -n "$variant" ] || variant=cuda
 

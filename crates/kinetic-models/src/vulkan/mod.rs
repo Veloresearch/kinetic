@@ -110,6 +110,11 @@ pub struct VulkanState {
     /// brought back.
     step: Graph,
     step_logits: Graph,
+    /// The same two for a full batch of prompt tokens, which the device may
+    /// run with kernels that round differently from the ones a token runs
+    /// with alone.
+    step_prompt: Graph,
+    step_prompt_logits: Graph,
     /// Brings back the logits of every head row.
     all_logits: Graph,
     /// What a rollback runs, when a layer needs it.
@@ -246,8 +251,10 @@ impl<'m> VulkanModel<'m> {
         Ok(VulkanState {
             pos: 0,
             checkpoint: None,
-            step: self.record(&work, &layers, false)?,
-            step_logits: self.record(&work, &layers, true)?,
+            step: self.record(&work, &layers, false, false)?,
+            step_logits: self.record(&work, &layers, true, false)?,
+            step_prompt: self.record(&work, &layers, false, true)?,
+            step_prompt_logits: self.record(&work, &layers, true, true)?,
             all_logits: all_logits.finish()?,
             replay,
             work,
@@ -281,9 +288,11 @@ impl<'m> VulkanModel<'m> {
         w: &Work,
         states: &[LayerState],
         logits: bool,
+        prompt: bool,
     ) -> kinetic_vulkan::Result<Graph> {
         let (k, d) = (&self.gpu.kernels, self.n_embd);
         let mut c = Commands::new(&self.gpu.device)?;
+        c.set_prompt(prompt);
         let rows = w.batch.rows();
         c.independent(|c| {
             w.batch.record_upload(c)?;
@@ -463,9 +472,14 @@ impl<'m> VulkanModel<'m> {
             let x = &mut w.embedded.as_mut_slice()[..n * d];
             embed_into(&self.embd, self.embd_scale, chunk, x);
             let one = logits && head.len() == 1;
-            match one {
-                true => state.step_logits.launch()?,
-                false => state.step.launch()?,
+            // A full batch whose rows are not each wanted, and that no
+            // draft may be rolled back over, is prompt processing.
+            let prompt = n == MAX_BATCH && !all_rows && state.checkpoint.is_none();
+            match (one, prompt) {
+                (true, true) => state.step_prompt_logits.launch()?,
+                (true, false) => state.step_logits.launch()?,
+                (false, true) => state.step_prompt.launch()?,
+                (false, false) => state.step.launch()?,
             }
             for pair in w.greedy.as_slice()[..2 * head.len()].chunks_exact(2) {
                 out.greedy.push(pair[0]);

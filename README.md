@@ -113,7 +113,7 @@ tar xzf kinetic-0.1.0-linux-x86_64-cuda.tar.gz
 |---|---|
 | `...-x86_64-cuda` | NVIDIA through CUDA, any GPU through Vulkan, the CPU |
 | `...-x86_64-cpu` | the CPU only, the smallest download |
-| `...-macos-arm64-vulkan` | Apple Silicon Macs: the GPU through Vulkan on Metal, the CPU |
+| `...-macos-arm64-metal` | Apple Silicon Macs: the GPU through Metal, the CPU |
 
 Take a `cuda` archive even if you are not sure you have a GPU: it starts on
 any machine and falls back to the CPU. It needs only the graphics driver,
@@ -542,16 +542,18 @@ checks every hash and the signature. Format: [FORMAT.md](crates/kinetic-ktc/FORM
 
 ## Devices
 
-| | CPU | NVIDIA (CUDA) | Vulkan |
-|---|---|---|---|
-| Hardware | x86-64 with AVX2, Apple Silicon | RTX 20, GTX 16, newer | AMD, Intel, NVIDIA, Apple |
-| Models | all | all text models | Llama, Qwen, LFM3 |
-| Bigger than the GPU | | layer split, MoE offload | coming |
-| Needs | nothing | the NVIDIA driver | the graphics driver; on macOS MoltenVK or KosmicKrisp |
+| | CPU | NVIDIA (CUDA) | Vulkan | Apple (Metal) |
+|---|---|---|---|---|
+| Hardware | x86-64 with AVX2, Apple Silicon | RTX 20, GTX 16, newer | AMD, Intel, NVIDIA | Apple Silicon |
+| Models | all | all text models | Llama, Qwen, LFM3 | Llama, Qwen, LFM3 |
+| Bigger than the GPU | | layer split, MoE offload | coming | coming |
+| Needs | nothing | the NVIDIA driver | the graphics driver | nothing |
 
-Vulkan runs Llama, Qwen2.5, Qwen3, Qwen3.5 and LFM3 today. `--device auto`
-(the default) tries CUDA, then Vulkan, then the CPU, and prints one line
-when it skips a device and why; `--device cuda`, `vulkan` or `cpu` picks one.
+Vulkan runs Llama, Qwen2.5, Qwen3, Qwen3.5 and LFM3 today, and so does
+Metal: on a Mac the same kernels run through Metal itself, with a matrix
+kernel of Metal's own for prompts. `--device auto` (the default) tries CUDA,
+then Vulkan or Metal, then the CPU, and prints one line when it skips a
+device and why; `--device cuda`, `vulkan`, `metal` or `cpu` picks one.
 
 <p align="center">
 <picture>
@@ -715,10 +717,9 @@ more architectures are coming. Other models run on the CPU on those machines.
 <details>
 <summary><b>Does it run on a Mac?</b></summary>
 
-Yes, on Apple Silicon. On the CPU the quantized kernels use NEON and the
-SDOT instruction. The GPU runs through Vulkan on Metal: install a driver
-with `brew install vulkan-loader mesa` (KosmicKrisp, the faster one) or
-`brew install vulkan-loader molten-vk`, and `kinetic doctor` lists the GPU. Intel Macs are not supported.
+Yes, on Apple Silicon, with nothing to install: the GPU runs through
+Metal, and on the CPU the quantized kernels use NEON and the SDOT
+instruction. `kinetic doctor` lists both. Intel Macs are not supported.
 
 </details>
 
