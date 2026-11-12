@@ -17,48 +17,48 @@ fn sbyte(v: vec4<u32>, i: u32) -> f32 {
     return f32(extractBits(bitcast<i32>(v[i / 4u]), 8u * (i % 4u), 8u));
 }
 
-// One invocation's share of a block for the first `m` of four input blocks: the weights are loaded and unpacked
-// once. Quants are stored as q + 32; dotting 32 with the input takes it
-// back out.
-fn dots(total: u32, blk: u32, xs: vec4<u32>, j: u32, m: u32) -> vec4<f32> {
+// Invocation j's shares of block `blk` of up to four rows, `n` blocks
+// apart, for input block b. The input is loaded and made float once for all
+// the rows. Quants are stored as q + 32, taken off as they become float.
+//
+// Each sum is of 16 products of a code below 32 in size and an int8, exact
+// in f32, so it is the integer sum bit for bit; a GPU without accelerated
+// int8 dot products multiplies floats faster.
+fn tile(total: u32, blk: u32, rows_apart: u32, live: u32, b: u32, j: u32) -> vec4<f32> {
     let n = j / 4u;
     let k = j % 4u;
     let g = k / 2u;
-
-    let lq = w[blk * 8u + j];
-    let hq = w[total * 8u + blk * 4u + 2u * n + (k & 1u)];
+    let e = b * 256u + 128u * n + 32u * g + 16u * (k & 1u);
+    let u = xq[e / 16u];
+    let v = xq[e / 16u + 4u];
+    let d0 = xd[e / 32u].x;
+    let d1 = xd[e / 32u + 2u].x;
+    let u0 = vec4<f32>(unpack4xI8(u.x));
+    let u1 = vec4<f32>(unpack4xI8(u.y));
+    let u2 = vec4<f32>(unpack4xI8(u.z));
+    let u3 = vec4<f32>(unpack4xI8(u.w));
+    let v0 = vec4<f32>(unpack4xI8(v.x));
+    let v1 = vec4<f32>(unpack4xI8(v.y));
+    let v2 = vec4<f32>(unpack4xI8(v.z));
+    let v3 = vec4<f32>(unpack4xI8(v.w));
     let low2 = vec4<u32>(0x03030303u);
-    let lo = (lq & vec4<u32>(NIBBLES)) | (((hq >> vec4<u32>(2u * g)) & low2) << vec4<u32>(4u));
-    let hi = ((lq >> vec4<u32>(4u)) & vec4<u32>(NIBBLES))
-        | (((hq >> vec4<u32>(2u * g + 4u)) & low2) << vec4<u32>(4u));
-    // Quants are stored as q + 32. The sums are of at most 16 products
-    // below 32 * 127, exact in f32, so they are taken in float, which the
-    // GPU multiplies faster than int8.
     let off = vec4<f32>(32.0);
-    let l0 = vec4<f32>(unpack4xU8(lo.x)) - off;
-    let l1 = vec4<f32>(unpack4xU8(lo.y)) - off;
-    let l2 = vec4<f32>(unpack4xU8(lo.z)) - off;
-    let l3 = vec4<f32>(unpack4xU8(lo.w)) - off;
-    let h0 = vec4<f32>(unpack4xU8(hi.x)) - off;
-    let h1 = vec4<f32>(unpack4xU8(hi.y)) - off;
-    let h2 = vec4<f32>(unpack4xU8(hi.z)) - off;
-    let h3 = vec4<f32>(unpack4xU8(hi.w)) - off;
-    let scales = w[total * 12u + blk];
     let sc = 8u * n + (k & 1u) + 2u * g;
-    let sc0 = sbyte(scales, sc);
-    let sc1 = sbyte(scales, sc + 4u);
-    let d = f16_at(total * 13u, blk);
     var out = vec4<f32>(0.0);
-    for (var i = 0u; i < m; i++) {
-        let e = xs[i] * 256u + 128u * n + 32u * g + 16u * (k & 1u);
-        let u = xq[e / 16u];
-        let v = xq[e / 16u + 4u];
-        let s0 = dot(l0, vec4<f32>(unpack4xI8(u.x))) + dot(l1, vec4<f32>(unpack4xI8(u.y)))
-            + dot(l2, vec4<f32>(unpack4xI8(u.z))) + dot(l3, vec4<f32>(unpack4xI8(u.w)));
-        let s1 = dot(h0, vec4<f32>(unpack4xI8(v.x))) + dot(h1, vec4<f32>(unpack4xI8(v.y)))
-            + dot(h2, vec4<f32>(unpack4xI8(v.z))) + dot(h3, vec4<f32>(unpack4xI8(v.w)));
-        let r = sc0 * xd[e / 32u].x * s0 + sc1 * xd[e / 32u + 2u].x * s1;
-        out[i] = d * r;
+    for (var r = 0u; r < live; r++) {
+        let at = blk + r * rows_apart;
+        let lq = w[at * 8u + j];
+        let hq = w[total * 8u + at * 4u + 2u * n + (k & 1u)];
+        let l = (lq & vec4<u32>(NIBBLES)) | (((hq >> vec4<u32>(2u * g)) & low2) << vec4<u32>(4u));
+        let h = ((lq >> vec4<u32>(4u)) & vec4<u32>(NIBBLES))
+            | (((hq >> vec4<u32>(2u * g + 4u)) & low2) << vec4<u32>(4u));
+        let s0 = dot(vec4<f32>(unpack4xU8(l.x)) - off, u0) + dot(vec4<f32>(unpack4xU8(l.y)) - off, u1)
+            + dot(vec4<f32>(unpack4xU8(l.z)) - off, u2) + dot(vec4<f32>(unpack4xU8(l.w)) - off, u3);
+        let s1 = dot(vec4<f32>(unpack4xU8(h.x)) - off, v0) + dot(vec4<f32>(unpack4xU8(h.y)) - off, v1)
+            + dot(vec4<f32>(unpack4xU8(h.z)) - off, v2) + dot(vec4<f32>(unpack4xU8(h.w)) - off, v3);
+        let scales = w[total * 12u + at];
+        let share = sbyte(scales, sc) * d0 * s0 + sbyte(scales, sc + 4u) * d1 * s1;
+        out[r] = f16_at(total * 13u, at) * share;
     }
     return out;
 }

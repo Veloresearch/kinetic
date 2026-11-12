@@ -1,8 +1,9 @@
-// `dots` for formats that define one input block's share as `block_dot`.
-fn dots(total: u32, blk: u32, xs: vec4<u32>, part: u32, m: u32) -> vec4<f32> {
+// `tile` for formats that define one row's share as `block_dot`, which
+// loads its input itself.
+fn tile(total: u32, blk: u32, n: u32, live: u32, b: u32, part: u32) -> vec4<f32> {
     var out = vec4<f32>(0.0);
-    for (var i = 0u; i < m; i++) {
-        out[i] = block_dot(total, blk, xs[i], part);
+    for (var r = 0u; r < live; r++) {
+        out[r] = block_dot(total, blk + r * n, b, part);
     }
     return out;
 }
