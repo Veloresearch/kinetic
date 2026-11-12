@@ -13,12 +13,12 @@
 ### The open engine for running AI on your own computer.
 
 Written in Rust. It reads GGUF files, the format llama.cpp uses, and runs the models it
-supports on the CPU, including Apple Silicon, and on NVIDIA, AMD and Intel GPUs, from
-one binary. Fast, and no speed-up ever changes the answer.
+supports on the CPU and on NVIDIA, AMD and Intel GPUs, from one binary. Fast, and no
+speed-up ever changes the answer.
 
 <br>
 
-[![Windows, Linux and macOS](https://img.shields.io/badge/Windows,_Linux,_macOS-x86--64_and_Apple_Silicon-DCD5E2?labelColor=1C1A1F&style=flat-square)](#install)
+[![Windows and Linux](https://img.shields.io/badge/Windows_and_Linux-x86--64-DCD5E2?labelColor=1C1A1F&style=flat-square)](#install)
 [![GPUs](https://img.shields.io/badge/NVIDIA,_AMD,_Intel-GPUs-E2AC80?labelColor=1C1A1F&style=flat-square)](#devices)
 [![API](https://img.shields.io/badge/API-OpenAI--compatible-DCD5E2?labelColor=1C1A1F&style=flat-square)](#use-it-from-your-app)
 [![License](https://img.shields.io/badge/license-Apache--2.0-DCD5E2?labelColor=1C1A1F&style=flat-square)](LICENSE)
@@ -37,7 +37,7 @@ one binary. Fast, and no speed-up ever changes the answer.
 irm https://raw.githubusercontent.com/Veloresearch/kinetic/main/scripts/install.ps1 | iex
 ```
 
-On Linux and on macOS (Apple Silicon):
+On Linux:
 
 ```sh
 curl -fsSL \
@@ -98,7 +98,7 @@ from doing less work, never from changing the output.
 
 The install scripts download the latest release, check it against
 `SHA256SUMS` and put `kinetic` on your `PATH`: in
-`%LOCALAPPDATA%\Programs\kinetic` on Windows, in `~/.local/bin` on Linux and macOS.
+`%LOCALAPPDATA%\Programs\kinetic` on Windows, in `~/.local/bin` on Linux.
 
 **By hand.** Take an archive from the
 [releases page](https://github.com/Veloresearch/kinetic/releases), check it
@@ -113,7 +113,6 @@ tar xzf kinetic-0.1.0-linux-x86_64-cuda.tar.gz
 |---|---|
 | `...-x86_64-cuda` | NVIDIA through CUDA, any GPU through Vulkan, the CPU |
 | `...-x86_64-cpu` | the CPU only, the smallest download |
-| `...-macos-arm64-metal` | Apple Silicon Macs: the GPU through Metal, the CPU |
 
 Take a `cuda` archive even if you are not sure you have a GPU: it starts on
 any machine and falls back to the CPU. It needs only the graphics driver,
@@ -542,18 +541,16 @@ checks every hash and the signature. Format: [FORMAT.md](crates/kinetic-ktc/FORM
 
 ## Devices
 
-| | CPU | NVIDIA (CUDA) | Vulkan | Apple (Metal) |
-|---|---|---|---|---|
-| Hardware | x86-64 with AVX2, Apple Silicon | RTX 20, GTX 16, newer | AMD, Intel, NVIDIA | Apple Silicon |
-| Models | all | all text models | Llama, Qwen, LFM3 | Llama, Qwen, LFM3 |
-| Bigger than the GPU | | layer split, MoE offload | coming | coming |
-| Needs | nothing | the NVIDIA driver | the graphics driver | nothing |
+| | CPU | NVIDIA (CUDA) | Vulkan |
+|---|---|---|---|
+| Hardware | x86-64 with AVX2 | RTX 20, GTX 16, newer | AMD, Intel, NVIDIA |
+| Models | all | all text models | Llama, Qwen, LFM3 |
+| Bigger than the GPU | | layer split, MoE offload | coming |
+| Needs | nothing | the NVIDIA driver | the graphics driver |
 
-Vulkan runs Llama, Qwen2.5, Qwen3, Qwen3.5 and LFM3 today, and so does
-Metal: on a Mac the same kernels run through Metal itself, with a matrix
-kernel of Metal's own for prompts. `--device auto` (the default) tries CUDA,
-then Vulkan or Metal, then the CPU, and prints one line when it skips a
-device and why; `--device cuda`, `vulkan`, `metal` or `cpu` picks one.
+Vulkan runs Llama, Qwen2.5, Qwen3, Qwen3.5 and LFM3 today. `--device auto`
+(the default) tries CUDA, then Vulkan, then the CPU, and prints one line
+when it skips a device and why; `--device cuda`, `vulkan` or `cpu` picks one.
 
 <p align="center">
 <picture>
@@ -717,9 +714,8 @@ more architectures are coming. Other models run on the CPU on those machines.
 <details>
 <summary><b>Does it run on a Mac?</b></summary>
 
-Yes, on Apple Silicon, with nothing to install: the GPU runs through
-Metal, and on the CPU the quantized kernels use NEON and the SDOT
-instruction. `kinetic doctor` lists both. Intel Macs are not supported.
+No. Kinetic supports Windows and Linux on x86-64 and is not planned for
+macOS.
 
 </details>
 
