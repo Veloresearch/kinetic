@@ -31,7 +31,18 @@ fn dots(total: u32, blk: u32, xs: vec4<u32>, j: u32, m: u32) -> vec4<f32> {
     let lo = (lq & vec4<u32>(NIBBLES)) | (((hq >> vec4<u32>(2u * g)) & low2) << vec4<u32>(4u));
     let hi = ((lq >> vec4<u32>(4u)) & vec4<u32>(NIBBLES))
         | (((hq >> vec4<u32>(2u * g + 4u)) & low2) << vec4<u32>(4u));
-    let bias = vec4<u32>(0x20202020u);
+    // Quants are stored as q + 32. The sums are of at most 16 products
+    // below 32 * 127, exact in f32, so they are taken in float, which the
+    // GPU multiplies faster than int8.
+    let off = vec4<f32>(32.0);
+    let l0 = vec4<f32>(unpack4xU8(lo.x)) - off;
+    let l1 = vec4<f32>(unpack4xU8(lo.y)) - off;
+    let l2 = vec4<f32>(unpack4xU8(lo.z)) - off;
+    let l3 = vec4<f32>(unpack4xU8(lo.w)) - off;
+    let h0 = vec4<f32>(unpack4xU8(hi.x)) - off;
+    let h1 = vec4<f32>(unpack4xU8(hi.y)) - off;
+    let h2 = vec4<f32>(unpack4xU8(hi.z)) - off;
+    let h3 = vec4<f32>(unpack4xU8(hi.w)) - off;
     let scales = w[total * 12u + blk];
     let sc = 8u * n + (k & 1u) + 2u * g;
     let sc0 = sbyte(scales, sc);
@@ -40,11 +51,13 @@ fn dots(total: u32, blk: u32, xs: vec4<u32>, j: u32, m: u32) -> vec4<f32> {
     var out = vec4<f32>(0.0);
     for (var i = 0u; i < m; i++) {
         let e = xs[i] * 256u + 128u * n + 32u * g + 16u * (k & 1u);
-        let x0 = xq[e / 16u];
-        let x1 = xq[e / 16u + 4u];
-        let s0 = dot16(lo, x0) - dot16(bias, x0);
-        let s1 = dot16(hi, x1) - dot16(bias, x1);
-        let r = sc0 * xd[e / 32u].x * f32(s0) + sc1 * xd[e / 32u + 2u].x * f32(s1);
+        let u = xq[e / 16u];
+        let v = xq[e / 16u + 4u];
+        let s0 = dot(l0, vec4<f32>(unpack4xI8(u.x))) + dot(l1, vec4<f32>(unpack4xI8(u.y)))
+            + dot(l2, vec4<f32>(unpack4xI8(u.z))) + dot(l3, vec4<f32>(unpack4xI8(u.w)));
+        let s1 = dot(h0, vec4<f32>(unpack4xI8(v.x))) + dot(h1, vec4<f32>(unpack4xI8(v.y)))
+            + dot(h2, vec4<f32>(unpack4xI8(v.z))) + dot(h3, vec4<f32>(unpack4xI8(v.w)));
+        let r = sc0 * xd[e / 32u].x * s0 + sc1 * xd[e / 32u + 2u].x * s1;
         out[i] = d * r;
     }
     return out;
