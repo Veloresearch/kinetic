@@ -108,6 +108,7 @@ seeded answer is the same for the same seed.
 | `-t`, `--threads <N>` | CPU threads [default: all] |
 | `--device <auto\|cpu\|cuda\|vulkan>` | where the model runs; `auto` tries CUDA, then Vulkan, then the CPU [default: auto]; see [Devices](devices.md) |
 | `--gpu-layers <N>` | most layers on the GPU, the rest on the CPU [default: as many as fit]; see [Devices](devices.md#dense-models-larger-than-the-gpu) |
+| `--gpus <LIST>` | CUDA GPUs to spread the layers over, such as `0,1`; the first also holds the embeddings and output head [default: 0]; see [Devices](devices.md#several-gpus) |
 | `--cache-dir <DIR>` | where Warm Start keeps prompt states [default: `kinetic/warm` in the user's cache directory] |
 | `--no-prompt-cache` | run every prompt from its first token; same as `--off warm-start` |
 | `--off <LIST>` | turn speed technologies off, comma-separated: `rad1`, `warm-start`, `zero-wait`, `shortlist`, `torque`, `convoy` |
@@ -232,6 +233,7 @@ kinetic bench model.gguf --device cpu -t 6 -r 5 --json
 | `-r`, `--repetitions <N>` | runs of each test; the best is reported [default: 3] |
 | `-t`, `--threads <N>` | CPU threads [default: all] |
 | `--device <auto\|cpu\|cuda>` | the device to measure [default: auto] |
+| `--gpus <LIST>` | CUDA GPUs to spread the layers over, as for `run` |
 | `--json` | print the results as one JSON object |
 | `--compare [LLAMA_BENCH]` | also run llama.cpp on the same file and print a card with both; see [bench --compare](#bench---compare) |
 | `--off <LIST>` | turn speed technologies off, as for `run`; bench measures RAD-1 (`edit256`), Shortlist and Torque |
@@ -456,10 +458,11 @@ To fix:
 kinetic fit
 kinetic fit qwen3:4b
 kinetic fit D:\models
+kinetic fit model.gguf --gpus 0,1
 ```
 
 For every model found, or the one or the folder given: whether it fits
-wholly on the GPU, needs its experts kept on the CPU (mixture-of-experts
+wholly on the GPU (or, with `--gpus`, on those GPUs together), needs its experts kept on the CPU (mixture-of-experts
 models), or runs on the CPU, with a decode speed range estimated from the
 bytes it reads per token and the memory bandwidth. `kinetic bench` measures
 the real speed.
