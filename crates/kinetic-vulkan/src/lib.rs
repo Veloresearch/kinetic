@@ -16,6 +16,8 @@
 //! are replaced by those in `src/metal`, and nothing above them changes.
 //! Its GEMV kernels are built from `shaders/metal`, where an invocation
 //! takes a tile of four rows: faster on a Mac's GPU, slower on the others.
+//! For passes of many prompt tokens it has kernels of its own; see
+//! [`Commands::set_prompt`].
 //!
 //! The decode-path GEMV kernels compute `y = W x` for one f32 vector. Float
 //! weights read `x` as f32; quantized weights read an int8 copy of `x`, in
@@ -92,6 +94,13 @@ mod pipeline;
 pub const API: &str = "Vulkan";
 #[cfg(metal_driver)]
 pub const API: &str = "Metal";
+
+/// Most tokens worth running as one prompt pass, or 0 for a driver with no
+/// kernels of its own for such passes; see [`Commands::set_prompt`].
+#[cfg(not(metal_driver))]
+pub const PROMPT_BATCH: usize = 0;
+#[cfg(metal_driver)]
+pub const PROMPT_BATCH: usize = 64;
 
 pub use attention::{AttentionGate, AttentionShape, KvCache, QkvConsts};
 pub use batch::{Batch, BATCH_HEADER};

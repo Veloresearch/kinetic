@@ -44,6 +44,7 @@ enum Op {
 pub struct Commands {
     device: Rc<Device>,
     ops: Vec<Op>,
+    prompt: bool,
 }
 
 /// A timestamp recorded in a [`Commands`] list. Metal times command
@@ -68,7 +69,20 @@ impl Commands {
         Ok(Commands {
             device: Rc::clone(device),
             ops: Vec::new(),
+            prompt: false,
         })
+    }
+
+    /// Says whether the commands recorded from here on run a pass of many
+    /// prompt tokens. A driver may then take kernels written for many
+    /// tokens at once, which give every token the bits it gets alone.
+    pub fn set_prompt(&mut self, prompt: bool) {
+        self.prompt = prompt;
+    }
+
+    /// See [`Commands::set_prompt`].
+    pub(crate) fn prompt(&self) -> bool {
+        self.prompt
     }
 
     /// Records the device time once all earlier commands are done.

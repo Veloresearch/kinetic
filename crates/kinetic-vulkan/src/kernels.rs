@@ -34,6 +34,9 @@ pub struct Kernels {
     pub(crate) gemv_f16: Rc<Kernel>,
     pub(crate) gemv_q8_0: Rc<Kernel>,
     pub(crate) gemv_q4_k: Rc<Kernel>,
+    /// The same sums for a pass of many tokens; see `shaders/metal`.
+    #[cfg(metal_driver)]
+    pub(crate) gemv_q4_k_many: Rc<Kernel>,
     pub(crate) gemv_q5_k: Rc<Kernel>,
     pub(crate) gemv_q6_k: Rc<Kernel>,
     pub(crate) quantize_q8: Rc<Kernel>,
@@ -63,6 +66,11 @@ impl Kernels {
             gemv_f16: gemv("gemv_f16", spirv!("gemv_f16"))?,
             gemv_q8_0: gemv("gemv_q8_0", spirv!("gemv_q8_0"))?,
             gemv_q4_k: gemv("gemv_q4_k", spirv!("gemv_q4_k"))?,
+            #[cfg(metal_driver)]
+            gemv_q4_k_many: gemv(
+                "gemv_q4_k_many",
+                include_bytes!("../shaders/metal/gemv_q4_k_many.metal"),
+            )?,
             gemv_q5_k: gemv("gemv_q5_k", spirv!("gemv_q5_k"))?,
             gemv_q6_k: gemv("gemv_q6_k", spirv!("gemv_q6_k"))?,
             quantize_q8: Kernel::new(device, "quantize_q8", spirv!("quantize_q8"), 3, 1)?,

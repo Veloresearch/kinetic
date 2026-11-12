@@ -16,7 +16,9 @@ the rules in [Versioning](https://veloresearch.github.io/kinetic/versioning.html
   the Vulkan kernels are written out as Metal shaders at build time and a
   Metal driver runs them (`--device metal`). Its GEMV kernels take a tile
   of four rows per invocation and their block sums in float, which is
-  faster on a Mac's GPU and changes no result. A `macos-arm64-metal`
+  faster on a Mac's GPU and changes no result. A prompt runs in passes of
+  up to 64 tokens, whose Q4_K matrices take a kernel written for many
+  tokens that gives every token the bits it gets alone. A `macos-arm64-metal`
   archive and a Python wheel are built for every release.
 - Built without the `metal` feature, the Vulkan backend also runs on a Mac
   through MoltenVK or KosmicKrisp: it opts into portability drivers, finds
