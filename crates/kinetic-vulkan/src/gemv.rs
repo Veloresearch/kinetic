@@ -93,7 +93,7 @@ impl DeviceMatrix {
     }
 }
 
-/// Rows a threadgroup of the prompt kernel takes.
+/// Rows a threadgroup of the prompt kernel takes; the last may have fewer.
 #[cfg(metal_driver)]
 const GEMM_ROWS: usize = 64;
 /// Tokens a threadgroup of the prompt kernel takes; it runs them all, so
@@ -109,11 +109,10 @@ impl DeviceMatrix {
     /// The f16 copy the prompt kernel reads, made on first use.
     fn half(&self) -> Result<Option<&DeviceBuffer<u16>>> {
         if self.half.get().is_none() {
-            let made =
-                match self.rows.is_multiple_of(GEMM_ROWS) && self.cols.is_multiple_of(GEMM_COLS) {
-                    true => self.dequantized()?,
-                    false => None,
-                };
+            let made = match self.cols.is_multiple_of(GEMM_COLS) {
+                true => self.dequantized()?,
+                false => None,
+            };
             // Only this thread uses the device, so nothing set it meanwhile.
             let _ = self.half.set(made);
         }
@@ -382,7 +381,7 @@ impl Kernels {
                             out.offset as u32,
                         ],
                         [
-                            (w.rows / GEMM_ROWS) as u32,
+                            w.rows.div_ceil(GEMM_ROWS) as u32,
                             (batch.rows() / GEMM_TOKENS) as u32,
                             1,
                         ],

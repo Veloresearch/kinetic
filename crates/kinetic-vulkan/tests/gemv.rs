@@ -229,7 +229,7 @@ fn q6_k_prompt_batch_matches_reference() {
     check_prompt_batch(TensorType::Q6K, 128, 3 * 256);
 }
 
-// Rows no prompt kernel tiles evenly take the exact one.
+// 37 rows leave a prompt kernel's only threadgroup partly empty.
 #[test]
 fn odd_prompt_batch_matches_reference() {
     check_prompt_batch(TensorType::Q4K, 37, 256);

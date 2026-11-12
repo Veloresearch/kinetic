@@ -14,7 +14,9 @@
 // One pass runs as many tokens as the batch holds, and the more the
 // better: the weights are read once however many there are. Token groups
 // past the batch's count return at once; the last one may run tokens past
-// it, on whatever their rows hold, into rows nobody reads.
+// it, on whatever their rows hold, into rows nobody reads. A last
+// threadgroup with fewer than 64 rows left takes zeros for the rest and
+// writes its sums one by one, the rows that exist only.
 //
 // The weights are f16 and the sums f32. Unlike the GEMV kernels this does
 // not give a token the sum it gets alone, so it only runs prompt batches
@@ -41,7 +43,8 @@ struct Shape {
     threadgroup float *tokens_part [[threadgroup(1)]],
     uint3 group [[threadgroup_position_in_grid]],
     ushort tid [[thread_index_in_threadgroup]],
-    ushort simd_group [[simdgroup_index_in_threadgroup]])
+    ushort simd_group [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]])
 {
     const ulong r0 = (ulong)group.x * 64;
     const ulong t0 = (ulong)group.y * 32;
@@ -56,6 +59,7 @@ struct Shape {
     // one token, four per token.
     const ushort row = tid / 2, half_of_row = tid % 2;
     const ushort token = tid / 4, quarter = tid % 4;
+    const bool has_row = r0 + row < s.rows;
     device const half *from_w = w + (r0 + row) * s.cols + 16 * half_of_row;
     device const float *from_x = x + (t0 + token) * s.cols + 8 * quarter;
     // Tiles by step of eight columns, then by eight rows or tokens; a tile
@@ -71,13 +75,17 @@ struct Shape {
     for (uint k = 0; k < s.cols; k += 32) {
         // Nobody still reads the last part.
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        *(threadgroup packed_float4 *)(to_rows) = float4(*(device const packed_half4 *)(from_w + k));
-        *(threadgroup packed_float4 *)(to_rows + 4) =
-            float4(*(device const packed_half4 *)(from_w + k + 4));
-        *(threadgroup packed_float4 *)(to_rows + 512) =
-            float4(*(device const packed_half4 *)(from_w + k + 8));
-        *(threadgroup packed_float4 *)(to_rows + 516) =
-            float4(*(device const packed_half4 *)(from_w + k + 12));
+        float4 w0 = float4(0.0f), w1 = float4(0.0f), w2 = float4(0.0f), w3 = float4(0.0f);
+        if (has_row) {
+            w0 = float4(*(device const packed_half4 *)(from_w + k));
+            w1 = float4(*(device const packed_half4 *)(from_w + k + 4));
+            w2 = float4(*(device const packed_half4 *)(from_w + k + 8));
+            w3 = float4(*(device const packed_half4 *)(from_w + k + 12));
+        }
+        *(threadgroup packed_float4 *)(to_rows) = w0;
+        *(threadgroup packed_float4 *)(to_rows + 4) = w1;
+        *(threadgroup packed_float4 *)(to_rows + 512) = w2;
+        *(threadgroup packed_float4 *)(to_rows + 516) = w3;
         *(threadgroup packed_float4 *)(to_tokens) = *(device const packed_float4 *)(from_x + k);
         *(threadgroup packed_float4 *)(to_tokens + 4) =
             *(device const packed_float4 *)(from_x + k + 4);
@@ -98,8 +106,26 @@ struct Shape {
     }
     const ulong first_row = r0 + 32 * (simd_group % 2);
     const ulong first_token = t0 + 16 * (simd_group / 2);
+    if (r0 + 64 <= s.rows) {
+        for (int i = 0; i < 8; i++) {
+            simdgroup_store(sum[i], y + s.offset, s.stride,
+                            ulong2(first_row + 8 * (i % 4), first_token + 8 * (i / 4)), true);
+        }
+        return;
+    }
+    // Nobody still reads the rows' part, which holds just the eight tiles
+    // of each SIMD group: a row of the matrix per eight floats.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float *mine = rows_part + 512 * simd_group;
     for (int i = 0; i < 8; i++) {
-        simdgroup_store(sum[i], y + s.offset, s.stride,
-                        ulong2(first_row + 8 * (i % 4), first_token + 8 * (i / 4)), true);
+        simdgroup_store(sum[i], mine + 64 * i, 8, 0, false);
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint e = lane; e < 512; e += 32) {
+        const ulong at_row = first_row + 8 * ((e / 64) % 4) + (e % 64) / 8;
+        const ulong at_token = first_token + 8 * (e / 256) + e % 8;
+        if (at_row < s.rows) {
+            y[at_token * s.stride + s.offset + at_row] = mine[e];
+        }
     }
 }
