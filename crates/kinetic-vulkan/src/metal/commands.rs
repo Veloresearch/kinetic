@@ -44,6 +44,7 @@ enum Op {
 pub struct Commands {
     device: Rc<Device>,
     ops: Vec<Op>,
+    prompt: bool,
 }
 
 /// A timestamp recorded in a [`Commands`] list. Metal times command
@@ -68,7 +69,22 @@ impl Commands {
         Ok(Commands {
             device: Rc::clone(device),
             ops: Vec::new(),
+            prompt: false,
         })
+    }
+
+    /// Says whether the commands recorded from here on run a batch of
+    /// only prompt tokens, whose results nobody compares with a token's
+    /// alone.
+    /// The matrix products of such a batch then take the SIMD-group matrix
+    /// kernel, which rounds differently from the GEMV kernels.
+    pub fn set_prompt(&mut self, prompt: bool) {
+        self.prompt = prompt;
+    }
+
+    /// See [`Commands::set_prompt`].
+    pub(crate) fn prompt(&self) -> bool {
+        self.prompt
     }
 
     /// Records the device time once all earlier commands are done.

@@ -18,6 +18,11 @@ the rules in [Versioning](https://veloresearch.github.io/kinetic/versioning.html
   of four rows per invocation and their block sums in float, which is
   faster on a Mac's GPU and changes no result. A `macos-arm64-metal`
   archive and a Python wheel are built for every release.
+- With `KINETIC_FAST_PROMPT=1`, prompts on Metal take a kernel on its
+  SIMD-group matrices, up to 512 tokens in a pass and several times faster
+  than the exact kernels. It is off by default because it rounds
+  differently from them and keeps an f16 copy of the weights; generation,
+  drafts and Warm Start stay exact.
 - Built without the `metal` feature, the Vulkan backend also runs on a Mac
   through MoltenVK or KosmicKrisp: it opts into portability drivers, finds
   Homebrew's loader and accepts devices whose subgroups are 32 wide without
