@@ -46,6 +46,7 @@ mod depth;
 mod device;
 mod driver;
 mod error;
+mod exchange;
 mod ffn;
 mod fold;
 mod gemm;
@@ -74,6 +75,7 @@ pub use delta_net::{DeltaIo, DeltaParams, DeltaShape, DeltaState, Flow, HostStat
 pub use depth::DEPTH_MAX_STATES;
 pub use device::{driver_version, Device, DeviceInfo};
 pub use error::{Error, Result};
+pub use exchange::{Exchange, Mailbox, EXCHANGE_BLOCKS};
 pub use fold::ValueHeads;
 pub use gemv::{DeviceMatrix, GemvInput, MAX_BATCH};
 pub use graph::Graph;
