@@ -40,6 +40,7 @@ mod short_conv;
 mod split;
 mod staging;
 mod target;
+mod tensor;
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -66,6 +67,7 @@ use pass::{PassRows, PASS_ROWS};
 use per_layer::{CudaLayerInput, CudaPerLayer};
 use scratch::{Scratch, Spare, Work};
 use staging::Staging;
+use tensor::Part;
 
 pub use experts::{Plan, PoolPlan, Stats};
 pub use host::CudaRunner;
@@ -215,8 +217,12 @@ pub struct CudaModel<'m> {
     layers: Vec<CudaLayer>,
     /// Runs `layers` in a model whose layers do not run one after another.
     network: Option<CudaNetwork>,
-    /// The layers after `layers`, on further devices in turn.
+    /// The layers after `layers`, on further devices in turn; or, with
+    /// `tensor`, the other devices' shares of every layer.
     shards: Vec<Shard>,
+    /// Whether every layer is split over the devices, rather than each
+    /// device running a run of whole layers; see [`tensor`].
+    tensor: bool,
     per_layer: Option<CudaPerLayer>,
     /// Most tokens one pass runs.
     rows: usize,
@@ -367,6 +373,16 @@ impl<'m> CudaModel<'m> {
         if !others.is_empty() {
             check_splits(model, moes.is_some())?;
         }
+        // prototype: KINETIC_TENSOR_SPLIT=1 asks for it until the
+        // command line does
+        let asked =
+            placement.tensor || std::env::var("KINETIC_TENSOR_SPLIT").is_ok_and(|v| v == "1");
+        let tensor = !others.is_empty() && asked;
+        if tensor && others.len() > 1 {
+            return Err(LoadError(
+                "splitting layers by tensors works over two GPUs for now".into(),
+            ));
+        }
         let tied = std::ptr::eq(model.output.data, model.embd.data);
         let output = (!tied)
             .then(|| gpu.matrix(&model.output))
@@ -429,6 +445,23 @@ impl<'m> CudaModel<'m> {
                 };
                 (embd, 0, layers)
             }
+            None if tensor => {
+                let embd = Embeddings::Device(table()?);
+                let ranks = others.len() + 1;
+                let upload = |g: &Gpu, rank: usize| -> Result<Vec<CudaLayer>, LoadError> {
+                    let part = Part { rank, ranks };
+                    model
+                        .layers
+                        .iter()
+                        .map(|l| CudaLayer::upload(g, l, None, model.eps, part))
+                        .collect()
+                };
+                let main = upload(&gpu, 0)?;
+                for (k, (g, _)) in others.iter().enumerate() {
+                    shard_layers.push(upload(g, k + 1)?);
+                }
+                (embd, 0, main)
+            }
             None => {
                 let vocab = model.output.rows;
                 let embd = Embeddings::Device(table()?);
@@ -454,7 +487,7 @@ impl<'m> CudaModel<'m> {
                 (embd, placed.front, placed.main)
             }
         };
-        let shards = make_shards(&gpu, others, shard_layers, model)?;
+        let shards = make_shards(&gpu, others, shard_layers, model, tensor)?;
         let mut layers = layers;
         if let Some(p) = &model.per_layer {
             if front > 0 {
@@ -491,6 +524,7 @@ impl<'m> CudaModel<'m> {
             layers,
             network,
             shards,
+            tensor,
             per_layer,
             rows,
             prefill,
@@ -503,7 +537,8 @@ impl<'m> CudaModel<'m> {
             spare: None,
             planned: RefCell::new(None),
             shared_step: RefCell::new(None),
-            eager: placement.eager,
+            // prototype: the sums between devices are not recorded yet
+            eager: placement.eager || tensor,
             unrecorded: Cell::new(false),
             staging: RefCell::new(None),
         };
@@ -719,7 +754,7 @@ impl<'m> CudaModel<'m> {
         for shard in &self.shards {
             let layers: Vec<&CudaLayer> = shard.layers.iter().collect();
             // no head there; the batch comes over whole, grid and all
-            let w = Work::new(
+            let mut w = Work::new(
                 &shard.gpu,
                 &layers,
                 d,
@@ -729,7 +764,14 @@ impl<'m> CudaModel<'m> {
                 0,
                 self.folded,
             )?;
+            if self.tensor {
+                // where the other device's partial outputs come over
+                w.scratch.sum = DeviceBuffer::new(&shard.gpu.ctx, rows * d)?;
+            }
             work.shards.push(w);
+        }
+        if self.tensor {
+            work.scratch.sum = DeviceBuffer::new(&self.gpu.ctx, rows * d)?;
         }
         if self.host.grid_rope {
             work.batch.use_grid();
@@ -1020,7 +1062,7 @@ impl<'m> CudaModel<'m> {
                         .copy_range_to(0, &mut out.logits[start..])?;
                     self.host.cap(&mut out.logits[start..]);
                 }
-            } else if head.is_none() && !self.shards.is_empty() {
+            } else if head.is_none() && !self.shards.is_empty() && !self.tensor {
                 // The rows go to the host from the last shard, and the main
                 // device moves on to the next pass.
                 self.embed(&mut state.work, chunk)?;
@@ -1227,6 +1269,9 @@ impl<'m> CudaModel<'m> {
     /// the scratch: those of the main device, then those of each shard, the
     /// stream handed from device to device and its norm back for the head.
     fn queue_layers(&self, work: &mut Work, flow: Flow) -> kinetic_cuda::Result<()> {
+        if self.tensor {
+            return self.queue_tensor(work, flow);
+        }
         self.queue_main(work, flow)?;
         for k in 0..self.shards.len() {
             self.hand_to_shard(work, k)?;
@@ -1431,6 +1476,7 @@ fn make_shards(
     others: Vec<(Gpu, usize)>,
     layers: Vec<Vec<CudaLayer>>,
     model: &Model,
+    tensor: bool,
 ) -> Result<Vec<Shard>, LoadError> {
     let mut shards: Vec<Shard> = Vec::new();
     for ((gpu, _), layers) in others.into_iter().zip(layers) {
@@ -1438,6 +1484,7 @@ fn make_shards(
         let entry_norm = layers[0]
             .mixer_norm
             .as_ref()
+            .filter(|_| !tensor)
             .map(|w| w.to_vec().and_then(|v| prev.vector(&v)))
             .transpose()
             .map_err(cuda_error)?;
@@ -1471,7 +1518,7 @@ fn upload_experts_layers(gpu: &Gpu, model: &Model) -> Result<Vec<CudaLayer>, Loa
                     CudaExperts::upload(gpu, moe, next.map(|n| &n.router), l.ffn.is_some())
                 })
                 .transpose()?;
-            CudaLayer::upload(gpu, l, experts, model.eps)
+            CudaLayer::upload(gpu, l, experts, model.eps, Part::WHOLE)
         })
         .collect()
 }
