@@ -88,10 +88,12 @@ pub fn run() -> Result<()> {
     }
     for g in &gpus {
         if let Some(problem) = &g.problem {
-            fixes.push(format!(
-                "{} through {}: {problem}; update its driver",
-                g.name, g.api
-            ));
+            let advice = if problem.contains("this GPU only runs") {
+                "no driver update changes that, so models run on the CPU (`--device cpu`)"
+            } else {
+                "update its driver"
+            };
+            fixes.push(format!("{} through {}: {problem}; {advice}", g.name, g.api));
         }
         if let Some(free) = g.memory_free {
             if g.memory_total >= 4 << 30 && free < 1 << 30 {

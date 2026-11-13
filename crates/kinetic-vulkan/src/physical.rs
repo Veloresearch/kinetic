@@ -100,9 +100,21 @@ impl DeviceInfo {
         if (major, minor) < (1, 3) {
             lacks.push(format!("Vulkan 1.3 (driver offers {major}.{minor})"));
         }
+        let (min, max) = f.subgroup_size_range;
+        // (0, 0) means the range was never reported: the driver is older than 1.3
+        let subgroups = if min != 0 && !(min..=max).contains(&SUBGROUP) {
+            let sizes = if min == max {
+                min.to_string()
+            } else {
+                format!("{min} to {max}")
+            };
+            format!("subgroups of {SUBGROUP} (this GPU only runs subgroups of {sizes})")
+        } else {
+            format!("subgroups of {SUBGROUP}")
+        };
         for (have, what) in [
             (f.subgroup_arithmetic, "subgroup arithmetic"),
-            (f.subgroup_size_32, "subgroups of 32"),
+            (f.subgroup_size_32, subgroups.as_str()),
             (f.integer_dot_product, "integer dot products"),
             (f.push_descriptor, "push descriptors"),
         ] {

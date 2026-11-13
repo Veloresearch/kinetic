@@ -13,6 +13,11 @@ the rules in [Versioning](https://veloresearch.github.io/kinetic/versioning.html
 - LFM2.5 mixture of experts (`lfm2moe`), experimental, on the CPU and CUDA,
   with experts kept in system memory when they do not fit the GPU.
 
+### Fixed
+
+- `kinetic doctor` says when a GPU only runs 64-wide
+  subgroups (AMD GCN, Vega) instead of suggesting a driver update (#2).
+
 ## [0.1.0] - 2026-11-05
 
 The first public release.
