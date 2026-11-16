@@ -48,8 +48,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use kinetic_cuda::{
-    Batch, Context, Device, DeviceBuffer, DeviceMatrix, Event, Graph, Kernels, KvType, Mailbox,
-    PinnedBuffer, Stream, MAX_BATCH,
+    Batch, Context, Courier, Device, DeviceBuffer, DeviceMatrix, Event, Graph, Kernels, KvType,
+    Mailbox, PinnedBuffer, Stream, MAX_BATCH,
 };
 
 use crate::blocks::{Folding, Moe};
@@ -118,6 +118,9 @@ struct Gpu {
     /// Recorded once this device has copied what another handed it over,
     /// which that device waits for before it overwrites the source.
     copied: Event,
+    /// Recorded after a layer's mixer in the first of two prompt passes in
+    /// flight, which the second waits for before it runs the same mixer.
+    mixed: Event,
     /// How attention caches store keys and values.
     cache: [KvType; 2],
     /// The weights uploaded expanded, for the line said after loading.
@@ -150,6 +153,7 @@ impl Gpu {
             join: Event::new(&ctx)?,
             handoff: Event::new(&ctx)?,
             copied: Event::new(&ctx)?,
+            mixed: Event::new(&ctx)?,
             cache: [KvType::F16; 2],
             expanded: Expanded::default(),
             reserve: 0,
@@ -242,6 +246,9 @@ pub struct CudaModel<'m> {
     /// The state the expert cache was placed around, which the first
     /// [`CudaModel::new_state`] hands out.
     planned: RefCell<Option<CudaState>>,
+    /// A second prompt pass in flight beside the first, in a model split by
+    /// tensors over distinct devices; see [`tensor::Overlap`].
+    overlap: Option<tensor::Overlap>,
     /// The last shared one-token pass recorded, and the states it runs.
     shared_step: RefCell<Option<(Vec<u64>, Graph)>>,
     /// See [`Placement::eager`].
@@ -554,6 +561,7 @@ impl<'m> CudaModel<'m> {
             convoy: Convoy::for_device(),
             spare: None,
             planned: RefCell::new(None),
+            overlap: None,
             shared_step: RefCell::new(None),
             eager: placement.eager,
             unrecorded: Cell::new(false),
@@ -578,6 +586,7 @@ impl<'m> CudaModel<'m> {
                 let mtp = cuda.mtp.as_mut().expect("a prediction block");
                 mtp.spare = Some(RefCell::new(Spare::new(spare)));
             }
+            cuda.overlap = cuda.new_overlap(placement.one_pass).map_err(cuda_error)?;
         }
         if let Some(line) = cuda.gpu.expanded.report() {
             eprintln!("{line}");
@@ -784,12 +793,18 @@ impl<'m> CudaModel<'m> {
             if self.tensor {
                 let blocks = self.exchange_blocks();
                 w.scratch.mailbox = Some(Mailbox::new(&shard.gpu.ctx, rows * d, blocks)?);
+                if blocks > 1 {
+                    w.scratch.courier = Some(Courier::new(&shard.gpu.ctx, rows * d)?);
+                }
             }
             work.shards.push(w);
         }
         if self.tensor {
             let blocks = self.exchange_blocks();
             work.scratch.mailbox = Some(Mailbox::new(&self.gpu.ctx, rows * d, blocks)?);
+            if blocks > 1 {
+                work.scratch.courier = Some(Courier::new(&self.gpu.ctx, rows * d)?);
+            }
         }
         if self.host.grid_rope {
             work.batch.use_grid();
@@ -1022,7 +1037,21 @@ impl<'m> CudaModel<'m> {
             true => vec![tokens],
             false => batches(tokens, state.pos, since.is_none(), self.batch_rows()).collect(),
         };
-        for chunk in chunks {
+        let mut at = 0;
+        while at < chunks.len() {
+            // Two passes that read no logits run at once where they can.
+            if let Some(o) = &self.overlap {
+                if since.is_none() && !all_rows && at + 2 < chunks.len() {
+                    let (a, b) = (chunks[at], chunks[at + 1]);
+                    let hidden = &mut out.hidden[done * d..][..(a.len() + b.len()) * d];
+                    self.run_pair(state, o, a, b, hidden)?;
+                    done += a.len() + b.len();
+                    at += 2;
+                    continue;
+                }
+            }
+            let chunk = chunks[at];
+            at += 1;
             let n = chunk.len();
             let last = done + n == tokens.len();
             let head = match (all_rows, last) {
@@ -1138,6 +1167,40 @@ impl<'m> CudaModel<'m> {
             s.drain(&mut out.hidden)?;
         }
         Ok(out)
+    }
+
+    /// Runs the batches `a` and `b`, which read no logits, as two passes in
+    /// flight, and writes their hidden rows to `hidden`.
+    fn run_pair(
+        &self,
+        state: &mut CudaState,
+        overlap: &tensor::Overlap,
+        a: &[u32],
+        b: &[u32],
+        hidden: &mut [f32],
+    ) -> kinetic_cuda::Result<()> {
+        let mut spare = overlap.spare.borrow_mut();
+        let shift = state.work.batch.grid_shift();
+        state.work.batch.set(state.pos, a, &self.gpu.stream)?;
+        self.embed(&mut state.work, a)?;
+        spare.swap(&mut state.work);
+        state.work.batch.set_grid_shift(shift);
+        let embedded = state
+            .work
+            .batch
+            .set(state.pos + a.len(), b, &self.gpu.stream)
+            .and_then(|()| self.embed(&mut state.work, b));
+        spare.swap(&mut state.work);
+        embedded?;
+        self.queue_pair(&mut state.work, &mut spare, Flow::Commit)?;
+        let (first, second) = hidden.split_at_mut(a.len() * self.n_embd);
+        state.work.scratch.h.values().copy_range_to(0, first)?;
+        spare.swap(&mut state.work);
+        let copied = state.work.scratch.h.values().copy_range_to(0, second);
+        spare.swap(&mut state.work);
+        copied?;
+        state.pos += a.len() + b.len();
+        Ok(())
     }
 
     /// Records the pass `key` says over the batch in `work`, which holds
