@@ -204,6 +204,32 @@ attention caches (not mixture-of-experts models or Gemma 4 E2B/E4B), and
 runs the requests of `--parallel` one after another rather than in shared
 passes.
 
+### Every layer over two GPUs
+
+`--split-mode row` (llama.cpp's `-sm row`; `tensor` means the same) splits
+every layer over two GPUs instead of giving each a run of layers. Each GPU
+holds a share of every layer's attention heads, delta-rule heads and
+feed-forward rows, both work on every token at once, and they add up their
+partial outputs twice per layer. Both GPUs work on every token, so answers
+and short prompts come about one and a half times as fast as over layers,
+and long prompts about a fifth faster (Qwen3.8 27B on two Tesla P100s); in
+exchange, the hidden state crosses between the GPUs twice per layer rather
+than once or twice per pass, so it gains most where the GPUs have direct
+access to each other.
+
+```sh
+kinetic serve model.gguf --gpus 0,1 --split-mode row
+```
+
+The partial outputs add up in another order than one GPU's products, so
+answers can differ slightly from those of one GPU or of a split by layers,
+as they would between two kinds of GPU. Batches, rollbacks and Warm Start
+states still change no bit.
+
+It takes exactly two GPUs, and the whole model must fit on them:
+`--gpu-layers` does not apply, and `kinetic fit` does not estimate it yet.
+The status line names both GPUs with every layer.
+
 ## Memory
 
 **Weights are memory-mapped.** Kinetic does not copy the model into its own

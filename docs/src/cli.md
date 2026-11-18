@@ -158,6 +158,7 @@ seeded answer is the same for the same seed.
 | `--device <auto\|cpu\|cuda\|vulkan>` | where the model runs; `auto` tries CUDA, then Vulkan, then the CPU [default: auto]; see [Devices](devices.md) |
 | `--gpu-layers <N>` | most layers on the GPU, the rest on the CPU [default: as many as fit]; see [Devices](devices.md#dense-models-larger-than-the-gpu) |
 | `--gpus <LIST>` | CUDA GPUs to spread the layers over, such as `0,1`; the first also holds the embeddings and output head [default: 0]; see [Devices](devices.md#several-gpus) |
+| `--split-mode <layer\|row>` | how `--gpus` divides the model: `layer` gives each GPU a run of whole layers, `row` (or `tensor`) splits every layer over two GPUs, faster but with slightly different results [default: layer]; see [Devices](devices.md#every-layer-over-two-gpus) |
 | `--cache-dir <DIR>` | where Warm Start keeps prompt states [default: `kinetic/warm` in the user's cache directory] |
 | `--no-prompt-cache` | run every prompt from its first token; same as `--off warm-start` |
 | `--cache-spacing <N>` | tokens between the states Warm Start keeps inside a prompt on models with recurrent layers, a multiple of 32 up to 8192; closer resumes more prompts and takes more memory, and a GPU rounds it up to its prompt batch [default: 256] |
@@ -290,6 +291,7 @@ kinetic bench model.gguf --device cpu -t 6 -r 5 --json
 | `-t`, `--threads <N>` | CPU threads [default: all] |
 | `--device <auto\|cpu\|cuda>` | the device to measure [default: auto] |
 | `--gpus <LIST>` | CUDA GPUs to spread the layers over, as for `run` |
+| `--split-mode <layer\|row>` | how `--gpus` divides the model, as for `run` |
 | `--json` | print the results as one JSON object |
 | `--compare [LLAMA_BENCH]` | also run llama.cpp on the same file and print a card with both; see [bench --compare](#bench---compare) |
 | `--off <LIST>` | turn speed technologies off, as for `run`; bench measures RAD-1 (the edit tests), Shortlist and Torque |

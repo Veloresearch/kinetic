@@ -393,14 +393,17 @@ impl<'m> CudaModel<'m> {
         if !others.is_empty() {
             check_splits(model, moes.is_some())?;
         }
-        // prototype: KINETIC_TENSOR_SPLIT=1 asks for it until the
-        // command line does
-        let asked =
-            placement.tensor || std::env::var("KINETIC_TENSOR_SPLIT").is_ok_and(|v| v == "1");
-        let tensor = !others.is_empty() && asked;
-        if tensor && others.len() > 1 {
+        let tensor = placement.tensor;
+        if tensor && others.len() != 1 {
             return Err(LoadError(
-                "splitting layers by tensors works over two GPUs for now".into(),
+                "splitting every layer works over two GPUs for now; name them in --gpus, such as 0,1"
+                    .into(),
+            ));
+        }
+        if tensor && placement.gpu_layers.is_some() {
+            return Err(LoadError(
+                "a model split in every layer runs wholly on the GPUs; --gpu-layers does not apply"
+                    .into(),
             ));
         }
         let tied = std::ptr::eq(model.output.data, model.embd.data);

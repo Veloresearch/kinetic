@@ -46,9 +46,10 @@ pub struct Placement {
     /// head. Empty means device 0 alone. A device may be named twice, which
     /// splits the layers on it as if over two, for testing the split.
     pub devices: Vec<usize>,
-    /// Over several devices, splits every layer over all of them, each
-    /// holding a share of its heads and rows, instead of giving each device
-    /// a run of whole layers; see [`tensor`](super::tensor).
+    /// Over two devices, splits every layer over both, each holding a share
+    /// of its heads and rows, instead of giving each device a run of whole
+    /// layers; see [`tensor`](super::tensor). The whole model must then fit
+    /// on the devices.
     pub tensor: bool,
     /// With `tensor`, runs prompt passes one at a time instead of two at
     /// once; the results are the same, only slower.

@@ -83,11 +83,19 @@ struct Speeds {
 /// need repeated, typed or concurrent requests, which the tests never send.
 const MEASURED: [Tech; 3] = [Tech::Rad1, Tech::Shortlist, Tech::Torque];
 
+/// The CUDA GPUs to run on, and whether every layer is split over them.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub struct Gpus<'a> {
+    pub list: &'a [usize],
+    pub tensor: bool,
+}
+
 pub fn run(
     path: &Path,
     name: &str,
     device: Device,
-    gpus: &[usize],
+    gpus: Gpus<'_>,
     tests: Tests,
     off: &[Tech],
     as_json: bool,
@@ -119,7 +127,8 @@ pub fn run(
             let drafting = || {
                 let placement = kinetic_models::cuda::Placement {
                     eager,
-                    devices: gpus.to_vec(),
+                    devices: gpus.list.to_vec(),
+                    tensor: gpus.tensor,
                     ..Default::default()
                 };
                 let gpu = kinetic_server::CudaBackend::with_placement(&model, context, placement)?;
@@ -259,14 +268,15 @@ fn plain<'a>(
     context: usize,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] eager: bool,
     #[cfg_attr(not(feature = "vulkan"), allow(unused_variables))] matrix: bool,
-    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpus: &[usize],
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpus: Gpus<'_>,
 ) -> Option<std::result::Result<Plain<'a>, LoadError>> {
     match kind {
         #[cfg(feature = "cuda")]
         Device::Cuda => {
             let placement = kinetic_models::cuda::Placement {
                 eager,
-                devices: gpus.to_vec(),
+                devices: gpus.list.to_vec(),
+                tensor: gpus.tensor,
                 ..Default::default()
             };
             Some(

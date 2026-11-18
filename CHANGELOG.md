@@ -88,6 +88,10 @@ home screen in the terminal.
   [#22](https://github.com/Veloresearch/kinetic/pull/22), @brianporeilly).
 - Several CUDA GPUs: `--gpus 0,1` on `run`, `chat`, `serve` and `bench` spreads
   a dense model's layers over them, with the same output as on one GPU.
+  `--split-mode row` (`-sm row`) instead splits every layer over two GPUs
+  by heads and rows, so both work on each token at once: answers about one
+  and a half times as fast, with results that differ slightly from one
+  GPU's.
   A prediction block drafts from the first GPU. Mixture-of-experts models,
   Gemma 4 E2B/E4B and shared passes stay on one GPU for now. `kinetic fit
   --gpus` estimates for them, `kinetic doctor` times the copies between each

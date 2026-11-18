@@ -3,9 +3,10 @@
 //! greedy passes, whose logits stay on the device, and passes that return
 //! every row's logits, as sampling needs.
 //!
-//! cargo run --release -p kinetic-models --features cuda --example cuda_kpass -- model.gguf prompt.txt [devices]
+//! cargo run --release -p kinetic-models --features cuda --example cuda_kpass -- model.gguf prompt.txt [devices] [tensor]
 //!
-//! `devices` is a list such as `0,1`, over which the layers are spread.
+//! `devices` is a list such as `0,1`; `tensor` splits every layer over them
+//! instead of handing each a run of layers.
 
 use std::time::Instant;
 
@@ -17,13 +18,14 @@ const RUNS: usize = 8;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let usage = "usage: cuda_kpass <model.gguf> <prompt.txt> [devices]";
+    let usage = "usage: cuda_kpass <model.gguf> <prompt.txt> [devices] [tensor]";
     let path = args.next().ok_or(usage)?;
     let prompt = std::fs::read_to_string(args.next().ok_or(usage)?)?;
     let devices: Vec<usize> = match args.next() {
         Some(d) => d.split(',').map(str::parse).collect::<Result<_, _>>()?,
         None => Vec::new(),
     };
+    let tensor = args.next().as_deref() == Some("tensor");
 
     let file = GgufFile::open(&path)?;
     let tokenizer = Tokenizer::from_gguf(file.header())?;
@@ -31,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ids = tokenizer.encode(&prompt, true);
     let placement = Placement {
         devices,
+        tensor,
         ..Placement::default()
     };
     let gpu = CudaModel::load_with(&model, ids.len() + 64, placement)?;

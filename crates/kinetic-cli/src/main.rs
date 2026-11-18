@@ -156,6 +156,12 @@ enum Command {
         /// embeddings and the output head [default: 0]
         #[arg(long, value_name = "LIST", value_delimiter = ',')]
         gpus: Vec<usize>,
+        /// How --gpus divides the model: layer gives each GPU a run of whole
+        /// layers; row splits every layer over two GPUs by heads and rows, so
+        /// both work on each token at once (llama.cpp's -sm row; tensor is the
+        /// same)
+        #[arg(long, value_enum, value_name = "MODE", default_value_t = SplitMode::Layer)]
+        split_mode: SplitMode,
         /// Also run llama.cpp's llama-bench on the same file with the same
         /// settings and print a card comparing both [default: llama-bench
         /// on PATH or in a usual install folder]
@@ -361,6 +367,12 @@ struct RuntimeArgs {
     /// embeddings and the output head [default: 0]
     #[arg(long, value_name = "LIST", value_delimiter = ',')]
     gpus: Vec<usize>,
+    /// How --gpus divides the model: layer gives each GPU a run of whole
+    /// layers; row splits every layer over two GPUs by heads and rows, so
+    /// both work on each token at once (llama.cpp's -sm row; tensor is the
+    /// same)
+    #[arg(long, value_enum, value_name = "MODE", default_value_t = SplitMode::Layer)]
+    split_mode: SplitMode,
     /// Directory for states of earlier prompts, which later prompts that
     /// start the same way resume from [default: the user's cache directory]
     #[arg(long, value_name = "DIR")]
@@ -453,6 +465,14 @@ enum CacheType {
     F16,
     #[value(name = "q8_0")]
     Q8_0,
+}
+
+/// How several GPUs divide a model, as llama.cpp's --split-mode.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SplitMode {
+    Layer,
+    #[value(alias = "tensor")]
+    Row,
 }
 
 #[cfg(feature = "cuda")]
@@ -785,6 +805,7 @@ fn run(cli: Cli) -> Result<()> {
             threads,
             device,
             gpus,
+            split_mode,
             compare,
             depth,
             off,
@@ -810,7 +831,10 @@ fn run(cli: Cli) -> Result<()> {
                 &model.path,
                 &model.name,
                 device,
-                &gpus,
+                bench::Gpus {
+                    list: &gpus,
+                    tensor: split_mode == SplitMode::Row,
+                },
                 tests,
                 &off.off,
                 json,
@@ -1126,6 +1150,7 @@ fn cuda_backend<'a>(
         gpu_layers: runtime.gpu_layers,
         device_reserve: runtime.gpu_reserve.map(|m| m << 20),
         devices: runtime.gpus.clone(),
+        tensor: runtime.split_mode == SplitMode::Row,
         eager: runtime.is_off(Tech::Torque),
         cache_k: runtime.cache_type_k.into(),
         cache_v: runtime.cache_type_v.into(),
