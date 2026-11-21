@@ -61,8 +61,10 @@ impl VulkanLayer {
             Mixer::Attention(a) => VulkanMixer::Attention(VulkanAttention::upload(gpu, a, ropes)?),
             Mixer::ShortConv(s) => VulkanMixer::ShortConv(VulkanShortConv::upload(gpu, s)?),
             Mixer::DeltaNet(d) => VulkanMixer::DeltaNet(VulkanDeltaNet::upload(gpu, d)?),
-            Mixer::Mamba2(_) | Mixer::Parallel(_) => {
-                return Err(unsupported("Mamba-2 and parallel token mixers"))
+            Mixer::Mamba2(_) | Mixer::Parallel(_) | Mixer::Relative(_) => {
+                return Err(unsupported(
+                    "Mamba-2, parallel and relative-distance token mixers",
+                ))
             }
         };
         if l.experts.is_some() {

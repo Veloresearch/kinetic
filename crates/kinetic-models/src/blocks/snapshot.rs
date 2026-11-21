@@ -13,6 +13,11 @@ impl MixerState {
             MixerState::ShortConv(s) => vec![&s.window.past],
             MixerState::Mamba2(s) => vec![&s.s, &s.conv.past],
             MixerState::Parallel(s) => s.iter().flat_map(MixerState::buffers).collect(),
+            MixerState::Relative(s) => [&s.kv.k, &s.kv.v]
+                .into_iter()
+                .chain(s.convs.iter().map(|c| &c.past))
+                .map(|b| &b[..])
+                .collect(),
         }
     }
 
@@ -24,6 +29,10 @@ impl MixerState {
             MixerState::ShortConv(s) => vec![&mut s.window.past],
             MixerState::Mamba2(s) => vec![&mut s.s, &mut s.conv.past],
             MixerState::Parallel(s) => s.iter_mut().flat_map(MixerState::buffers_mut).collect(),
+            MixerState::Relative(s) => [&mut s.kv.k, &mut s.kv.v]
+                .into_iter()
+                .chain(s.convs.iter_mut().map(|c| &mut c.past))
+                .collect(),
         }
     }
 }
@@ -47,6 +56,7 @@ impl Mixer<'_> {
                 m.conv_bias.len() * (m.conv_taps - 1),
             ],
             Mixer::Parallel(ms) => ms.iter().flat_map(|m| m.buffer_lens(pos)).collect(),
+            Mixer::Relative(a) => a.buffer_lens(pos),
         }
     }
 
@@ -67,7 +77,9 @@ impl Mixer<'_> {
         match self {
             Mixer::Attention(a) => a.window.is_none_or(|w| pos <= w),
             Mixer::Parallel(ms) => ms.iter().all(|m| m.truncates_in_place(pos)),
-            Mixer::DeltaNet(_) | Mixer::ShortConv(_) | Mixer::Mamba2(_) => false,
+            Mixer::DeltaNet(_) | Mixer::ShortConv(_) | Mixer::Mamba2(_) | Mixer::Relative(_) => {
+                false
+            }
         }
     }
 

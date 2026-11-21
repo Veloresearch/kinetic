@@ -158,6 +158,7 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
         layers,
         mtp: None,
         per_layer: Some(per_layer),
+        network: None,
     })
 }
 

@@ -7,7 +7,7 @@ use kinetic_cuda::{
 use kinetic_quant::{Matrix, TensorType};
 
 use super::Gpu;
-use crate::blocks::{scale_offsets, Experts, Gating, Job, Moe};
+use crate::blocks::{scale_offsets, Experts, Gating, Glu, Job, Moe};
 
 fn gpu() -> Option<Gpu> {
     let ctx = Context::new(Device::get(0).ok()?).ok()?;
@@ -71,7 +71,7 @@ fn device_experts_equal_host_experts_bit_for_bit() {
                 data,
                 rows,
                 cols,
-                count,
+                stride: data.len() / count,
             }
         }
         let moe = Moe {
@@ -82,6 +82,8 @@ fn device_experts_equal_host_experts_bit_for_bit() {
             n_used: 2,
             shared_gate: None,
             gating: Gating::Softmax,
+            glu: Glu::Silu,
+            weight_scale: 1.0,
         };
         let h: Vec<f32> = random_bytes(tokens * d, &mut seed)
             .iter()

@@ -3,6 +3,7 @@ use std::sync::{Arc, OnceLock};
 use kinetic_cpu::{matmul, pool, rms_norm};
 use kinetic_quant::{dequantize_row, Matrix};
 
+use crate::arch::inkling2::Network;
 use crate::blocks::{end_lending, lend_kv, Folding, Mixer, MixerState, Moe, Part, SwiGlu, Tree};
 use crate::convoy::{Convoy, Seat};
 use crate::head::Shortlist;
@@ -135,6 +136,9 @@ pub struct Model<'a> {
     pub(crate) layers: Vec<Layer<'a>>,
     pub(crate) per_layer: Option<PerLayer<'a>>,
     pub(crate) mtp: Option<Mtp<'a>>,
+    /// Runs the layers, for models whose layers do not run one after
+    /// another on one residual stream.
+    pub(crate) network: Option<Network<'a>>,
     /// Whether attention takes (time, row, column) rotary positions, which
     /// give an image fewer positions than it has tokens.
     pub(crate) grid_rope: bool,
@@ -406,6 +410,17 @@ impl Model<'_> {
             let lane = lanes.pop().expect("one lane");
             return vec![(lane.state, forward)];
         }
+        if self.network.is_some() {
+            return lanes
+                .into_iter()
+                .map(|mut l| {
+                    let (all, top) = (l.all_logits, l.top);
+                    let forward =
+                        self.run_alone(&mut l.state, l.x, &l.inputs, None, None, all, top);
+                    (l.state, forward)
+                })
+                .collect();
+        }
         let d = self.n_embd;
         let rows: Vec<usize> = lanes.iter().map(|l| l.x.len() / d).collect();
         let pos0: Vec<usize> = lanes
@@ -520,16 +535,21 @@ impl Model<'_> {
     ) -> Forward {
         let d = self.n_embd;
         let pos0 = state.pos - state.rope_shift();
-        for (i, layer) in self.layers.iter().enumerate() {
-            if let Some(from) = layer.mixer.kv_source() {
-                lend_kv(&mut state.layers, from, i);
+        if let Some(network) = &self.network {
+            assert!(grid.is_none(), "this model takes no images");
+            x = network.forward(&self.layers, x, pos0, tree, &mut state.layers);
+        } else {
+            for (i, layer) in self.layers.iter().enumerate() {
+                if let Some(from) = layer.mixer.kv_source() {
+                    lend_kv(&mut state.layers, from, i);
+                }
+                layer.forward(&mut x, self.eps, pos0, grid, tree, &mut state.layers[i]);
+                if let Some(p) = &self.per_layer {
+                    p.apply(i, &mut x, inputs, self.eps);
+                }
             }
-            layer.forward(&mut x, self.eps, pos0, grid, tree, &mut state.layers[i]);
-            if let Some(p) = &self.per_layer {
-                p.apply(i, &mut x, inputs, self.eps);
-            }
+            end_lending(&mut state.layers);
         }
-        end_lending(&mut state.layers);
         state.pos += x.len() / d;
 
         self.norm_rows(&mut x, &self.output_norm);

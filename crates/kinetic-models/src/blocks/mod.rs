@@ -5,22 +5,26 @@ mod attention;
 mod conv_window;
 mod delta_chunk;
 mod delta_net;
+mod depth;
 mod folding;
 mod mamba2;
 mod moe;
+mod relative;
 mod short_conv;
 mod snapshot;
 mod tree;
 
 pub use attention::{Attention, Gate, KvCache, Rope, RopeLayout, SharedKv};
 pub use delta_net::{DeltaNet, DeltaNetState};
+pub use depth::{mix, Control};
 pub use folding::Folding;
 pub use mamba2::{Mamba2, Mamba2State};
 #[cfg(all(test, feature = "cuda"))]
 pub(crate) use moe::scale_offsets;
-pub(crate) use moe::{Experts, Gating, Moe};
+pub(crate) use moe::{Experts, Gating, Glu, Moe};
 #[cfg(feature = "cuda")]
 pub(crate) use moe::{Job, Pick};
+pub use relative::{RelAttention, RelState};
 pub use short_conv::{ShortConv, ShortConvState};
 pub use tree::Tree;
 
@@ -37,6 +41,9 @@ pub enum Mixer<'a> {
     Mamba2(Mamba2<'a>),
     /// Mixers that read the same input, with their outputs summed.
     Parallel(Vec<Mixer<'a>>),
+    /// Attention by relative distance, whose layers run inside their
+    /// model's network (Inkling 2).
+    Relative(Box<RelAttention<'a>>),
 }
 
 #[derive(Clone)]
@@ -46,6 +53,7 @@ pub enum MixerState {
     ShortConv(ShortConvState),
     Mamba2(Mamba2State),
     Parallel(Vec<MixerState>),
+    Relative(Box<RelState>),
 }
 
 impl MixerState {
@@ -57,6 +65,7 @@ impl MixerState {
             MixerState::ShortConv(s) => s.checkpoint(),
             MixerState::Mamba2(s) => s.checkpoint(),
             MixerState::Parallel(s) => s.iter_mut().for_each(MixerState::checkpoint),
+            MixerState::Relative(s) => s.checkpoint(),
         }
     }
 }
@@ -102,6 +111,7 @@ impl Mixer<'_> {
             Mixer::ShortConv(s) => MixerState::ShortConv(s.new_state()),
             Mixer::Mamba2(m) => MixerState::Mamba2(m.new_state()),
             Mixer::Parallel(ms) => MixerState::Parallel(ms.iter().map(Mixer::new_state).collect()),
+            Mixer::Relative(a) => MixerState::Relative(Box::new(a.new_state())),
         }
     }
 
@@ -117,6 +127,7 @@ impl Mixer<'_> {
             Mixer::ShortConv(s) => s.out_proj.cols * (s.taps - 1),
             Mixer::Mamba2(m) => m.inner() * m.d_state + m.channels() * (m.conv_taps - 1),
             Mixer::Parallel(ms) => return ms.iter().map(|m| m.state_bytes(len)).sum(),
+            Mixer::Relative(a) => a.state_floats(len),
         };
         floats * size_of::<f32>()
     }
@@ -132,6 +143,7 @@ impl Mixer<'_> {
             (Mixer::Parallel(ms), MixerState::Parallel(ss)) => {
                 ms.iter().zip(ss).for_each(|(m, s)| m.rollback(s, rows))
             }
+            (Mixer::Relative(a), MixerState::Relative(s)) => a.rollback(s, rows),
             _ => unreachable!("state does not belong to this mixer"),
         }
     }
@@ -161,6 +173,7 @@ impl Mixer<'_> {
                     sum
                 })
                 .expect("parallel mixers"),
+            (Mixer::Relative(_), _) => unreachable!("relative attention runs in its network"),
             _ => unreachable!("state does not belong to this mixer"),
         }
     }
@@ -227,6 +240,7 @@ impl Mixer<'_> {
                     sum
                 })
                 .expect("parallel mixers"),
+            Mixer::Relative(_) => unreachable!("relative attention runs in its network"),
         }
     }
 }

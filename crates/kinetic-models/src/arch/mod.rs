@@ -7,6 +7,7 @@ pub(crate) mod falcon_h1;
 pub(crate) mod gemma4;
 pub(crate) mod gemma_embedding;
 pub(crate) mod granite;
+pub(crate) mod inkling2;
 pub(crate) mod lfm2;
 pub(crate) mod lfm3;
 mod mamba;
@@ -16,6 +17,7 @@ pub(crate) mod rope;
 pub(crate) mod transformer;
 
 use crate::arch::bert::Encoder;
+use crate::arch::inkling2::Network;
 use crate::folds::Folds;
 use crate::loader::Loader;
 use crate::model::{Layer, Mtp};
@@ -32,6 +34,7 @@ pub(crate) const FAMILIES: &[Family] = &[
     gemma4::FAMILY,
     granite::FAMILY,
     falcon_h1::FAMILY,
+    inkling2::FAMILY,
     bert::FAMILY,
     transformer::GEMMA_EMBEDDING,
 ];
@@ -91,12 +94,14 @@ pub(crate) struct Basics<'f> {
     pub folds: Option<&'f Folds>,
 }
 
-/// The layers a builder returns, the prediction block if the file has one
-/// and the per-layer token inputs if the model has them.
+/// The layers a builder returns, the prediction block if the file has one,
+/// the per-layer token inputs if the model has them, and the network that
+/// runs the layers if they do not run one after another.
 pub(crate) struct Stack<'a> {
     pub layers: Vec<Layer<'a>>,
     pub mtp: Option<Mtp<'a>>,
     pub per_layer: Option<PerLayer<'a>>,
+    pub network: Option<Network<'a>>,
 }
 
 impl<'a> From<Vec<Layer<'a>>> for Stack<'a> {
@@ -105,6 +110,7 @@ impl<'a> From<Vec<Layer<'a>>> for Stack<'a> {
             layers,
             mtp: None,
             per_layer: None,
+            network: None,
         }
     }
 }

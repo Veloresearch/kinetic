@@ -57,6 +57,11 @@ impl CudaMixer {
                     .map(|m| CudaMixer::upload(gpu, m))
                     .collect::<Result<_, _>>()?,
             ),
+            Mixer::Relative(_) => {
+                return Err(LoadError(
+                    "attention by relative distance does not run on CUDA yet".into(),
+                ))
+            }
         })
     }
 

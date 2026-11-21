@@ -36,6 +36,7 @@ pub(crate) const FAMILY: Family = Family::decoder(&["qwen35", "qwen35moe"], |l, 
         layers,
         mtp,
         per_layer: None,
+        network: None,
     })
 });
 

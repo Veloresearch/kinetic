@@ -181,6 +181,7 @@ mod tests {
                 output_scale: None,
             }],
             mtp: None,
+            network: None,
             grid_rope,
             shortlist: Default::default(),
             convoy: Default::default(),

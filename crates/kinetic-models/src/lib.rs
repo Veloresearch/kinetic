@@ -118,6 +118,7 @@ pub(crate) fn build<'a>(
         mut layers,
         mut mtp,
         per_layer,
+        network,
     } = build_layers(&l, &basics)?;
 
     let mut scaled: Vec<&mut Layer> = layers
@@ -136,6 +137,8 @@ pub(crate) fn build<'a>(
         Some(_) => l.matrix("output.weight", d, n_vocab)?,
         None => embd,
     };
+    // tables padded past the vocabulary score only its tokens
+    let output = output.top_rows(l.usize_or("vocab_size_unpadded", n_vocab)?);
     let (head_folding, embd_folding) = match &folds {
         Some(f) => (
             f.block(&[("output.weight", d)])?,
@@ -177,6 +180,7 @@ pub(crate) fn build<'a>(
         layers,
         per_layer,
         mtp,
+        network,
         grid_rope: file.header().arch_key("rope.dimension_sections").is_some(),
         shortlist: Default::default(),
         convoy: Default::default(),

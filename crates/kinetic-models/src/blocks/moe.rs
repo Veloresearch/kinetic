@@ -22,23 +22,38 @@ pub struct Experts<'a> {
     pub data: &'a [u8],
     pub rows: usize,
     pub cols: usize,
-    pub count: usize,
+    /// Bytes from the start of one expert's matrix to the next.
+    pub stride: usize,
 }
 
 impl<'a> Experts<'a> {
     /// Bytes of one expert's matrix.
     pub fn expert_bytes(&self) -> usize {
-        self.data.len() / self.count
+        self.rows * self.cols / self.ty.block_len() * self.ty.block_bytes()
     }
 
     pub fn expert(&self, e: usize) -> Matrix<'a> {
         let n = self.expert_bytes();
         Matrix::new(
             self.ty,
-            &self.data[e * n..(e + 1) * n],
+            &self.data[e * self.stride..][..n],
             self.rows,
             self.cols,
         )
+    }
+
+    /// The top and bottom halves of the rows of every expert, as the gate
+    /// and up projections stored together in one tensor.
+    pub fn halves(&self) -> (Experts<'a>, Experts<'a>) {
+        let half = Experts {
+            rows: self.rows / 2,
+            ..*self
+        };
+        let bottom = Experts {
+            data: &self.data[half.expert_bytes()..],
+            ..half
+        };
+        (half, bottom)
     }
 }
 
@@ -57,6 +72,36 @@ pub struct Moe<'a> {
     /// the shared expert's output.
     pub shared_gate: Option<Vec<f32>>,
     pub gating: Gating,
+    pub glu: Glu,
+    /// Multiplies the routed weights after they are normalized.
+    pub weight_scale: f32,
+}
+
+/// How an expert combines its gate and up projections.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Glu {
+    /// `silu(gate) * up`.
+    #[default]
+    Silu,
+    /// `beta tanh(gate / beta) sigmoid(gate) * linear tanh(up / linear)`,
+    /// with `up` left as is when `linear` is zero (Inkling 2).
+    Situ { beta: f32, linear: f32 },
+}
+
+impl Glu {
+    fn apply(self, gate: f32, up: f32) -> f32 {
+        match self {
+            Glu::Silu => kernels::silu(gate) * up,
+            Glu::Situ { beta, linear } => {
+                let up = if linear == 0.0 {
+                    up
+                } else {
+                    linear * (up / linear).tanh()
+                };
+                beta * (gate / beta).tanh() * sigmoid(gate) * up
+            }
+        }
+    }
 }
 
 /// How router logits become expert probabilities.
@@ -115,6 +160,10 @@ impl Moe<'_> {
         probs
             .chunks_exact_mut(n_exp)
             .flat_map(|p| self.gating.pick(p, self.n_used))
+            .map(|p| Pick {
+                weight: p.weight * self.weight_scale,
+                ..p
+            })
             .collect()
     }
 
@@ -191,7 +240,7 @@ impl Moe<'_> {
         pool::for_each_chunk(&mut act, ACTIVATION_CHUNK, |i, g| {
             g.iter_mut()
                 .zip(&up[i * ACTIVATION_CHUNK..])
-                .for_each(|(g, u)| *g = kernels::silu(*g) * u)
+                .for_each(|(g, u)| *g = self.glu.apply(*g, *u))
         });
 
         let actq: Vec<Q8K> = if kernels::supported(self.down.ty) {
@@ -377,6 +426,41 @@ mod tests {
         assert_eq!(picks.iter().map(|p| p.expert).collect::<Vec<_>>(), [2, 0]);
         let (a, b) = (sigmoid(0.0), sigmoid(2.0));
         assert!((picks[0].weight - a / (a + b)).abs() < 1e-6);
+    }
+
+    // Expected values computed in NumPy (float64) from llama.cpp's
+    // LLM_FFN_SITU with beta 4 and linear beta 25, as in Inkling 2.
+    #[test]
+    fn situ_matches_the_reference() {
+        let glu = Glu::Situ {
+            beta: 4.0,
+            linear: 25.0,
+        };
+        let want = [0.6179198, -2.511176, -5.410969];
+        for ((g, u), w) in [(0.5, 2.0), (-3.0, 30.0), (6.0, -1.5)]
+            .into_iter()
+            .zip(want)
+        {
+            assert!((glu.apply(g, u) - w).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn halves_split_each_expert_into_gate_and_up() {
+        let values: Vec<f32> = (0..16).map(|v| v as f32).collect();
+        let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let fused = Experts {
+            ty: TensorType::F32,
+            data: &data,
+            rows: 4,
+            cols: 2,
+            stride: 32,
+        };
+        let (gate, up) = fused.halves();
+        let row = |m: Matrix, r: usize| m.row(r).to_vec();
+        assert_eq!(row(gate.expert(1), 1), data[40..48]);
+        assert_eq!(row(up.expert(1), 0), data[48..56]);
+        assert_eq!(row(up.expert(0), 1), data[24..32]);
     }
 
     #[test]

@@ -192,7 +192,7 @@ impl KvCache {
     /// Stores the keys and values of position `pos`. A full window is a
     /// ring indexed by `pos % window`; attention does not depend on the
     /// order of positions.
-    fn store(&mut self, window: Option<usize>, pos: usize, k: &[f32], v: &[f32]) {
+    pub(super) fn store(&mut self, window: Option<usize>, pos: usize, k: &[f32], v: &[f32]) {
         let kv_dim = k.len();
         let undo = match window {
             Some(w) if self.k.len() == w * kv_dim => {

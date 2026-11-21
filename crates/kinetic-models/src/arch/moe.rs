@@ -2,7 +2,7 @@
 //! experts, of which a few run per token, and in some models a shared expert
 //! that runs on every token, in Qwen3.5 MoE behind a sigmoid gate.
 
-use crate::blocks::{Activation, Gating, Moe, SwiGlu};
+use crate::blocks::{Activation, Gating, Glu, Moe, SwiGlu};
 use crate::loader::Loader;
 use crate::LoadError;
 
@@ -37,6 +37,8 @@ pub(crate) fn routed<'a>(
         n_used: l.usize("expert_used_count")?,
         shared_gate: l.optional_vector(&t("ffn_gate_inp_shexp.weight"), d)?,
         gating,
+        glu: Glu::Silu,
+        weight_scale: 1.0,
     })
 }
 

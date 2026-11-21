@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashSet;
+
 use kinetic_gguf::{Gguf, TensorInfo, TensorSource, Value};
 use kinetic_quant::{dequantize, Matrix};
 
@@ -7,11 +10,16 @@ use crate::LoadError;
 /// Typed access to the tensors and hyperparameters of a model file.
 pub(crate) struct Loader<'a> {
     file: &'a dyn TensorSource,
+    /// The tensors and `<arch>.` keys read so far.
+    read: RefCell<HashSet<String>>,
 }
 
 impl<'a> Loader<'a> {
     pub fn new(file: &'a dyn TensorSource) -> Self {
-        Loader { file }
+        Loader {
+            file,
+            read: RefCell::default(),
+        }
     }
 
     pub fn header(&self) -> &'a Gguf {
@@ -19,9 +27,34 @@ impl<'a> Loader<'a> {
     }
 
     pub fn hparam(&self, key: &str) -> Result<&'a Value, LoadError> {
+        self.read.borrow_mut().insert(key.to_string());
         self.header()
             .arch_key(key)
             .ok_or_else(|| LoadError(format!("missing hyperparameter {key}")))
+    }
+
+    /// Fails on any tensor or `<arch>.` key of the file that was neither
+    /// read so far nor named in `skipped`, so a file with parts a family
+    /// has no place for does not load as if they were not there.
+    pub fn check_all_read(&self, skipped: &[&str]) -> Result<(), LoadError> {
+        let h = self.header();
+        let prefix = format!("{}.", h.architecture().unwrap_or_default());
+        let read = self.read.borrow();
+        let keys = h
+            .metadata
+            .iter()
+            .filter_map(|(k, _)| k.strip_prefix(&prefix));
+        let names = keys.chain(h.tensors.iter().map(|t| t.name.as_str()));
+        let left: Vec<&str> = names
+            .filter(|n| !read.contains(*n) && !skipped.contains(n))
+            .collect();
+        if left.is_empty() {
+            return Ok(());
+        }
+        Err(LoadError(format!(
+            "the file has parts this architecture does not use yet: {}",
+            left.join(", ")
+        )))
     }
 
     pub fn usize(&self, key: &str) -> Result<usize, LoadError> {
@@ -73,6 +106,7 @@ impl<'a> Loader<'a> {
     }
 
     fn tensor(&self, name: &str) -> Result<&'a TensorInfo, LoadError> {
+        self.read.borrow_mut().insert(name.to_string());
         self.header()
             .tensor(name)
             .ok_or_else(|| LoadError(format!("missing tensor {name}")))
@@ -106,12 +140,13 @@ impl<'a> Loader<'a> {
                 t.dims
             )));
         }
+        let data = self.file.tensor_data(t);
         Ok(Experts {
             ty: t.ty,
-            data: self.file.tensor_data(t),
+            data,
             rows,
             cols,
-            count,
+            stride: data.len() / count,
         })
     }
 
@@ -179,9 +214,9 @@ impl<'a> Loader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use kinetic_gguf::TensorType;
+    use kinetic_gguf::{Gguf, TensorInfo, TensorSource, TensorType, Value};
 
-    use super::*;
+    use super::Loader;
 
     struct Header(Gguf);
 
@@ -191,16 +226,16 @@ mod tests {
         }
 
         fn tensor_data(&self, _: &TensorInfo) -> &[u8] {
-            &[]
+            &[0; 4]
         }
     }
 
-    fn file(names: &[&str]) -> Header {
+    fn file(metadata: Vec<(String, Value)>, names: &[&str]) -> Header {
         Header(Gguf {
             version: 3,
             alignment: 32,
             data_offset: 0,
-            metadata: Vec::new(),
+            metadata,
             tensors: names
                 .iter()
                 .map(|&name| TensorInfo {
@@ -215,8 +250,29 @@ mod tests {
     }
 
     #[test]
+    fn check_all_read_names_what_was_left() {
+        let file = file(
+            vec![
+                ("general.architecture".into(), Value::String("x".into())),
+                ("x.read".into(), Value::U32(1)),
+                ("x.left".into(), Value::U32(2)),
+            ],
+            &["a", "b"],
+        );
+        let l = Loader::new(&file);
+        l.usize("read").unwrap();
+        l.vector("a", 1).unwrap();
+        let err = l.check_all_read(&[]).unwrap_err().0;
+        assert!(err.ends_with(": left, b"), "{err}");
+        l.check_all_read(&["left", "b"]).unwrap();
+    }
+
+    #[test]
     fn weight_scales_are_refused() {
-        let plain = file(&["blk.0.attn_q.weight", "blk.0.layer_output_scale.weight"]);
+        let plain = file(
+            Vec::new(),
+            &["blk.0.attn_q.weight", "blk.0.layer_output_scale.weight"],
+        );
         assert!(Loader::new(&plain).refuse_weight_scales().is_ok());
         for name in [
             "blk.0.attn_q.scale",
@@ -224,7 +280,7 @@ mod tests {
             "blk.0.attn_k.k_scale",
             "output.scale",
         ] {
-            let scaled = file(&["blk.0.attn_q.weight", name]);
+            let scaled = file(Vec::new(), &["blk.0.attn_q.weight", name]);
             let err = Loader::new(&scaled).refuse_weight_scales().unwrap_err();
             assert!(err.0.contains(name), "{}", err.0);
         }
