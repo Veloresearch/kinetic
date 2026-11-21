@@ -1,52 +1,79 @@
 //! Inkling 2: a tiny looped model against reference logits, and the
-//! ignored tests against a real file. Only the real file's header matters,
-//! so it may be a copy whose tensor data is a sparse hole of the same
-//! length. Loading fails on any tensor or `<arch>.` key the family neither
-//! reads nor names as skipped.
+//! ignored tests against real files. Only a real file's header matters, so
+//! it may be a copy whose tensor data is a sparse hole of the same length.
+//! Loading fails on any tensor or `<arch>.` key the family neither reads
+//! nor names as skipped. KINETIC_TEST_INKLING names one file, or a folder
+//! whose `.gguf` files are all checked, such as one holding every
+//! published quantization.
 //!
-//! KINETIC_TEST_INKLING=Inkling-2-Mini-IQ4_NL.gguf cargo test --release -p kinetic-models --test inkling -- --ignored
+//! KINETIC_TEST_INKLING=folder cargo test --release -p kinetic-models --test inkling -- --ignored --test-threads=1
+
+use std::path::PathBuf;
 
 use kinetic_gguf::{Gguf, GgufFile, TensorInfo, TensorOut, TensorSource, TensorType, Value};
 
-fn open() -> GgufFile {
-    let path = std::env::var("KINETIC_TEST_INKLING").expect("set KINETIC_TEST_INKLING");
-    GgufFile::open(path).unwrap()
+fn files() -> Vec<PathBuf> {
+    let path =
+        PathBuf::from(std::env::var("KINETIC_TEST_INKLING").expect("set KINETIC_TEST_INKLING"));
+    if !path.is_dir() {
+        return vec![path];
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(path)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "gguf"))
+        .collect();
+    files.sort();
+    files
 }
 
 #[test]
 #[ignore]
-fn reads_every_tensor_and_key_of_the_file() {
-    let file = open();
-    let model = kinetic_models::load(&file).unwrap();
-    let key = |k: &str| {
-        let arch = file.header().architecture().unwrap();
-        file.header()
-            .get(&format!("{arch}.{k}"))
-            .and_then(|v| v.as_u64())
-    };
-    let n_phys = key("block_count").unwrap();
-    let extra = match (key("loop.start"), key("loop.end"), key("loop.count")) {
-        (Some(start), Some(end), Some(count)) => (end - start) * (count - 1),
-        _ => 0,
-    };
-    assert_eq!(model.n_layers() as u64, n_phys + extra);
-    assert_eq!(Some(model.n_vocab() as u64), key("vocab_size_unpadded"));
+fn reads_every_tensor_and_key_of_every_file() {
+    for path in files() {
+        let file = GgufFile::open(&path).unwrap();
+        let model =
+            kinetic_models::load(&file).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let key = |k: &str| {
+            let arch = file.header().architecture().unwrap();
+            file.header()
+                .get(&format!("{arch}.{k}"))
+                .and_then(|v| v.as_u64())
+        };
+        // block_count lists every pass in Unsloth's layout, the physical
+        // layers only in ggml-org's
+        let listed = key("block_count").unwrap();
+        let extra = match (key("loop.start"), key("loop.end"), key("loop.count")) {
+            (Some(start), Some(end), Some(count)) => (end - start) * (count - 1),
+            _ => 0,
+        };
+        assert_eq!(
+            model.n_layers() as u64,
+            listed + extra,
+            "{}",
+            path.display()
+        );
+        assert_eq!(Some(model.n_vocab() as u64), key("vocab_size_unpadded"));
+        println!("{}: loads, {} layers", path.display(), model.n_layers());
+    }
 }
 
-/// Runs a token through every layer and pass. With the sparse copy the
-/// weights are zeros, so this checks the shapes and the order of the
-/// layers, not the values.
+/// Runs tokens through every layer and pass, each weight type through its
+/// product. With sparse copies the weights are zeros, so this checks the
+/// shapes, the types and the order of the layers, not the values.
 #[test]
 #[ignore]
-fn runs_a_token_through_every_pass() {
-    let file = open();
-    let model = kinetic_models::load(&file).unwrap();
-    let mut state = model.new_state();
-    let logits = model.forward_batch(&mut state, &[1, 2]);
-    assert_eq!(logits.len(), model.n_vocab());
-    assert!(logits.iter().all(|l| l.is_finite()));
-    let logits = model.forward(&mut state, 3);
-    assert!(logits.iter().all(|l| l.is_finite()));
+fn runs_tokens_through_every_pass_of_every_file() {
+    for path in files() {
+        let file = GgufFile::open(&path).unwrap();
+        let model = kinetic_models::load(&file).unwrap();
+        let mut state = model.new_state();
+        let logits = model.forward_batch(&mut state, &[1, 2]);
+        assert_eq!(logits.len(), model.n_vocab());
+        assert!(logits.iter().all(|l| l.is_finite()), "{}", path.display());
+        let logits = model.forward(&mut state, 3);
+        assert!(logits.iter().all(|l| l.is_finite()), "{}", path.display());
+    }
 }
 
 /// A file held in memory.
