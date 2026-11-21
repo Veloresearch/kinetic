@@ -145,6 +145,36 @@ fn downloads_resumes_and_skips() {
 }
 
 #[test]
+fn hf_downloads_then_opens_the_model() {
+    if !has_curl() {
+        eprintln!("skipped: no curl on PATH");
+        return;
+    }
+    let hub = hub();
+    let dir = scratch("hf");
+    let info = || {
+        Command::new(env!("CARGO_BIN_EXE_kinetic"))
+            .args(["info", "-hf", "good/model:Q4_K_M"])
+            .env("KINETIC_MODELS", &dir)
+            .env("HF_ENDPOINT", &hub.url)
+            .env_remove("HF_TOKEN")
+            .output()
+            .unwrap()
+    };
+    // the stand-in file is not a GGUF, so info fails only after the download
+    let out = info();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let file = dir.join("good").join("model").join(FILE);
+    assert_eq!(std::fs::read(&file).unwrap(), *hub.body);
+
+    let before = hub.served.load(Ordering::SeqCst);
+    let out = info();
+    assert!(stderr(&out).contains("is already here"), "{}", stderr(&out));
+    assert_eq!(hub.served.load(Ordering::SeqCst), before);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn deletes_a_corrupt_download() {
     if !has_curl() {
         eprintln!("skipped: no curl on PATH");

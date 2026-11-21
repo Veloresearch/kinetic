@@ -32,7 +32,8 @@ cp kinetic llama-server            # Windows: copy kinetic.exe llama-server.exe
 
 Flags for what Kinetic does by itself, such as `-fa`, `--jinja` or `-b`,
 are accepted and ignored. The few with no equivalent stop with a
-line saying what to use; `-hf` points at `kinetic pull`. The full list:
+line saying what to use. `-hf <org>/<repo>[:<quant>]` downloads the model
+as `kinetic pull` does the first time and runs it. The full list:
 [llama.cpp flags](llama-flags.md). What still differs in the HTTP API is
 listed under [llama-server API](server.md#llama-server-api).
 

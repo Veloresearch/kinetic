@@ -12,7 +12,15 @@ kinetic run  -m model.gguf -p "Hello" -n 64 --temp 0 -ngl 99
 
 llama-server -m model.gguf -c 8192 --port 8080 -ngl 99
 kinetic serve -m model.gguf -c 8192 --port 8080 -ngl 99
+
+llama-server -hf ggml-org/gemma-3-1b-it-GGUF:Q4_K_M
+kinetic serve -hf ggml-org/gemma-3-1b-it-GGUF:Q4_K_M
 ```
+
+`-hf <org>/<repo>[:<quant>]` downloads the model from Hugging Face the
+first time, as [`kinetic pull`](cli.md#pull) does, into Kinetic's models
+folder, and uses the file already there after that. `-hff` names the file
+when the quantization does not single one out.
 
 The commands differ: `llama-cli` is `kinetic run` (one prompt) or `kinetic
 chat` (a conversation), `llama-server` is `kinetic serve` and `llama-bench`

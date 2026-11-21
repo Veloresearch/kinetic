@@ -12,7 +12,7 @@ kinetic <COMMAND> [OPTIONS] [MODEL] ...
 | [`bench`](#bench) | measures load time, prompt, generation and edit speed, and peak memory |
 | [`info`](#info) | shows what a model file contains |
 | [`models`](#models) | lists the models on this computer, Ollama's and LM Studio's included |
-| [`pull`](#pull) | downloads a model from Hugging Face, the only command that uses the network |
+| [`pull`](#pull) | downloads a model from Hugging Face |
 | [`doctor`](#doctor) | checks the CPU, memory, GPUs, drivers and disk, and says what to fix |
 | [`fit`](#fit) | shows where each model would run and roughly how fast |
 | [`verify`](#verify) | checks every hash of a `.ktc` file and reports its signature |
@@ -28,7 +28,8 @@ opens. Nothing is downloaded before you pick. With input or output
 redirected, `kinetic` prints the help as before.
 
 Every command except `verify` and `verify-receipt` takes the model as its first argument or with
-`-m`/`--model`, as a `.gguf` or `.ktc` file. `kinetic --version` prints the
+`-m`/`--model`, as a `.gguf` or `.ktc` file, or as a Hugging Face repository
+with `-hf`/`--hf-repo` (see [pull](#pull)). `kinetic --version` prints the
 version and `kinetic <command> --help` the options of a command.
 
 Kinetic exits with 0 on success, 1 when the command fails (a missing file, a
@@ -421,8 +422,19 @@ checked against the SHA256 that Hugging Face publishes and are renamed into
 place only when they match. `HF_TOKEN` is sent for gated repositories and
 `HF_ENDPOINT` names a mirror. The transfer runs through the system's `curl`.
 
-Kinetic never connects to the network, except when you run `kinetic pull`;
-`run`, `chat`, `serve` and the others never download anything.
+`-hf <org>/<repo>[:<quant>]`, as llama.cpp takes it, does the same from
+`run`, `chat`, `serve`, `bench` and the other commands that take a model, then
+goes on with the downloaded file; a model already downloaded is not fetched
+again. `-hff`/`--hf-file <NAME>` picks the file as `--file` does:
+
+```sh
+kinetic run -hf ggml-org/gemma-3-1b-it-GGUF:Q4_K_M "Hello"
+kinetic serve -hf org/repo -hff model-Q8_0.gguf
+```
+
+Kinetic never connects to the network, except when you run `kinetic pull` or
+pass `-hf`; without it, `run`, `chat`, `serve` and the others never download
+anything.
 
 When a command fails, the error ends with a line saying what to do: a path
 to check, a smaller model or `-c`, a driver to install, a free `--port`, or a

@@ -15,6 +15,9 @@ const RENAMED: &[(&str, &str)] = &[
     ("-ctv", "--cache-type-v"),
     ("-a", "--alias"),
     ("-rea", "--reasoning"),
+    ("-hf", "--hf-repo"),
+    ("-hfr", "--hf-repo"),
+    ("-hff", "--hf-file"),
 ];
 
 /// llama.cpp's spellings of how many layers go to the GPU: zero means the
@@ -102,8 +105,8 @@ const UNSUPPORTED: &[(&[&str], &str)] = &[
         "speculative decoding is automatic and needs no draft model",
     ),
     (
-        &["-hf", "--hf-repo", "-mu", "--model-url"],
-        "download with `kinetic pull <org>/<repo>[:<quant>]`, then run it by name",
+        &["-mu", "--model-url"],
+        "name the Hugging Face repository instead: `-hf <org>/<repo>[:<quant>]`",
     ),
     (
         &["-f", "--file"],
@@ -234,7 +237,19 @@ mod tests {
     fn explains_unsupported_flags() {
         let err = translate(args(&["kinetic", "run", "m.gguf", "-ts", "1,1"])).unwrap_err();
         assert!(err.starts_with("-ts is a llama.cpp flag"), "{err}");
-        assert!(translate(args(&["-hf", "org/repo"])).is_err());
+        assert!(translate(args(&["-mu", "https://example.com/m.gguf"])).is_err());
+    }
+
+    #[test]
+    fn hugging_face_repositories() {
+        assert_eq!(
+            translate(args(&["run", "-hf", "org/repo:Q4_K_M", "-p", "hi"])).unwrap(),
+            args(&["run", "--hf-repo", "org/repo:Q4_K_M", "-p", "hi"])
+        );
+        assert_eq!(
+            translate(args(&["serve", "-hfr=org/repo", "-hff", "m-Q8_0.gguf"])).unwrap(),
+            args(&["serve", "--hf-repo=org/repo", "--hf-file", "m-Q8_0.gguf"])
+        );
     }
 
     #[test]

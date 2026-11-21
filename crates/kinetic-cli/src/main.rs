@@ -167,8 +167,8 @@ enum Command {
     },
     /// Check this computer: CPU, memory, GPUs, drivers and disk, with fixes
     Doctor,
-    /// Download a GGUF model from Hugging Face; the only command that uses
-    /// the network
+    /// Download a GGUF model from Hugging Face, as -hf does for the commands
+    /// that take a model
     Pull {
         /// The repository, and optionally the quantization: <org>/<repo>[:<quant>]
         repo: String,
@@ -275,17 +275,37 @@ enum Command {
 struct ModelArg {
     /// A .gguf or .ktc model file, or the name of a model `kinetic models`
     /// lists, such as qwen3:4b
-    #[arg(value_name = "MODEL", required_unless_present = "model_flag")]
+    #[arg(
+        value_name = "MODEL",
+        required_unless_present_any = ["model_flag", "hf_repo"]
+    )]
     model: Option<PathBuf>,
     /// The model file, as a flag
     #[arg(short = 'm', long = "model", value_name = "MODEL")]
     model_flag: Option<PathBuf>,
+    /// A model on Hugging Face, downloaded as `kinetic pull` does unless it
+    /// already is: <org>/<repo>[:<quant>]
+    #[arg(long, value_name = "REPO", conflicts_with = "model_flag")]
+    hf_repo: Option<String>,
+    /// The file of --hf-repo, when the quantization does not single one out
+    #[arg(long, value_name = "NAME", requires = "hf_repo")]
+    hf_file: Option<String>,
 }
 
 impl ModelArg {
-    /// The model, and the first positional argument when -m named the
-    /// model instead.
+    /// The model, and the first positional argument when -m or --hf-repo
+    /// named the model instead.
     fn split(self) -> Result<(Local, Option<String>)> {
+        if let Some(spec) = &self.hf_repo {
+            let path = pull::run(&pull::Pull {
+                spec,
+                file: self.hf_file.as_deref(),
+                projector: true,
+                dir: None,
+            })?;
+            let rest = self.model.map(|p| p.to_string_lossy().into_owned());
+            return Ok((library::locate(&path)?, rest));
+        }
         let (arg, rest) = match (self.model_flag, self.model) {
             (Some(path), rest) => (path, rest.map(|p| p.to_string_lossy().into_owned())),
             (None, Some(path)) => (path, None),
