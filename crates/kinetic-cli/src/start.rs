@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::fit::Speeds;
+use crate::fit::{Runs, Speeds};
 use crate::library::{self, Local};
 use crate::system::{self, Gpu, Machine};
 use crate::{console, pull, Result};
@@ -51,7 +51,7 @@ struct Choice {
     size: u64,
     source: Source,
     /// Where it runs and its expected decode speed range.
-    runs: (&'static str, f64, f64),
+    runs: Runs,
 }
 
 /// Offers models and returns the file of the one picked, downloaded if it
@@ -73,13 +73,16 @@ pub fn run() -> Result<Option<PathBuf>> {
     let width = choices.iter().map(|c| c.name.len()).max().unwrap_or(0);
     println!("\nPick a model to chat with:");
     for (i, c) in choices.iter().enumerate() {
-        let (on, lo, hi) = c.runs;
+        let runs = match c.runs {
+            (on, Some((lo, hi))) => format!("{on}, {lo:.0}-{hi:.0} tokens/s"),
+            (on, None) => on.to_owned(),
+        };
         let from = match c.source {
             Source::Disk(_) => "on this computer",
             Source::Hub(_) => "download",
         };
         println!(
-            "  {}  {:<width$}  {:>5.2} GiB  {from:<16}  {on}, {lo:.0}-{hi:.0} tokens/s",
+            "  {}  {:<width$}  {:>5.2} GiB  {from:<16}  {runs}",
             i + 1,
             c.name,
             c.size as f64 / GIB
@@ -153,7 +156,8 @@ fn choices(speeds: &Speeds, gpu_memory: u64, ram_free: u64, found: Vec<Local>) -
                 && !crate::is_embedding_model(&l.path).unwrap_or(true);
             let runs = chats.then(|| speeds.file(&l.path).ok())??;
             let size = h.size;
-            ((runs.1 + runs.2) / 2.0 >= READABLE).then_some(Choice {
+            let readable = runs.1.is_none_or(|(lo, hi)| (lo + hi) / 2.0 >= READABLE);
+            readable.then_some(Choice {
                 name: l.name,
                 size,
                 source: Source::Disk(l.path),

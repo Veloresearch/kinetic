@@ -67,37 +67,57 @@ impl Weights {
     }
 }
 
+/// Where a model runs and its decode speed range in tokens per second,
+/// which is estimated only for the CPU and CUDA GPUs.
+pub type Runs = (&'static str, Option<(f64, f64)>);
+
 /// What decode speed depends on here: the CUDA GPU with the most free
 /// memory, as (free bytes, bandwidth), and the RAM's measured bandwidth.
 pub struct Speeds {
     gpu: Option<(u64, f64)>,
     cpu_bandwidth: f64,
+    /// Memory of the largest usable Vulkan GPU, when there is no CUDA GPU.
+    vulkan: Option<u64>,
 }
 
 impl Speeds {
     pub fn measure(gpus: &[Gpu]) -> Speeds {
-        let gpu = best_cuda(gpus)
-            .and_then(|g| Some((g.memory_free.unwrap_or(g.memory_total), g.bandwidth?)));
+        let cuda = best_cuda(gpus);
+        let gpu = cuda.and_then(|g| Some((g.memory_free.unwrap_or(g.memory_total), g.bandwidth?)));
+        let vulkan = gpus
+            .iter()
+            .filter(|g| cuda.is_none() && g.api == crate::gpu::VULKAN && g.problem.is_none())
+            .map(|g| g.memory_total)
+            .max();
         Speeds {
             gpu,
             cpu_bandwidth: system::memory_bandwidth(),
+            vulkan,
         }
     }
 
     /// Where a model of `bytes`, none of them experts, runs and its decode
-    /// speed range in tokens per second.
-    pub fn dense(&self, bytes: u64) -> (&'static str, f64, f64) {
-        let w = Weights {
+    /// speed range.
+    pub fn dense(&self, bytes: u64) -> Runs {
+        self.runs(&Weights {
             dense: bytes,
             experts: 0,
             active_experts: 0,
-        };
-        place(&w, self.gpu, self.cpu_bandwidth)
+        })
     }
 
     /// As [`Speeds::dense`], for the model file at `path`.
-    pub fn file(&self, path: &Path) -> Result<(&'static str, f64, f64)> {
-        Ok(place(&Weights::read(path)?, self.gpu, self.cpu_bandwidth))
+    pub fn file(&self, path: &Path) -> Result<Runs> {
+        Ok(self.runs(&Weights::read(path)?))
+    }
+
+    fn runs(&self, w: &Weights) -> Runs {
+        // the Vulkan backend takes the whole model or none of it
+        if self.vulkan.is_some_and(|m| w.total() + HEADROOM <= m) {
+            return ("GPU", None);
+        }
+        let (on, lo, hi) = place(w, self.gpu, self.cpu_bandwidth);
+        (on, Some((lo, hi)))
     }
 }
 
@@ -187,6 +207,7 @@ impl Speeds {
         Ok(Speeds {
             gpu: (seconds_per_byte > 0.0).then_some((free, bandwidth)),
             cpu_bandwidth: system::memory_bandwidth(),
+            vulkan: None,
         })
     }
 }
@@ -241,13 +262,17 @@ pub fn run(target: Option<&Path>, list: &[usize]) -> Result<()> {
             }
             (_, Err(e)) => format!("{:>9}  unreadable: {e}", ""),
             (_, Ok(w)) => {
-                let (on, lo, hi) = place(&w, speeds.gpu, speeds.cpu_bandwidth);
+                let (on, speed) = speeds.runs(&w);
                 let size = (w.dense + w.experts) as f64 / GIB;
                 let mut note = String::new();
                 if on == "CPU" && w.dense + w.experts > machine.ram_available {
                     note = ", more than the free memory: reads from disk, much slower".into();
                 }
-                format!("{size:>5.2} GiB  {on:<20}  {lo:.0}-{hi:.0} t/s{note}",)
+                let speed = match speed {
+                    Some((lo, hi)) => format!("{lo:.0}-{hi:.0} t/s"),
+                    None => "not estimated".into(),
+                };
+                format!("{size:>5.2} GiB  {on:<20}  {speed}{note}")
             }
         };
         writeln!(out, "{:<width$}  {line}", m.name)?;
@@ -307,6 +332,22 @@ mod tests {
         assert!((lo - 1.0 / (1.0 / 165.0 + 1.0 / 22.5)).abs() < 0.01, "{lo}");
         assert!(hi > lo);
         assert_eq!(place(&w, None, 50e9).0, "CPU");
+    }
+
+    #[test]
+    fn a_model_that_fits_a_vulkan_gpu_runs_there_without_an_estimate() {
+        let speeds = Speeds {
+            gpu: None,
+            cpu_bandwidth: 50e9,
+            vulkan: Some(8 * GB),
+        };
+        assert_eq!(speeds.dense(2 * GB), ("GPU", None));
+        assert_eq!(speeds.dense(12 * GB).0, "CPU");
+        let none = Speeds {
+            vulkan: None,
+            ..speeds
+        };
+        assert_eq!(none.dense(2 * GB).0, "CPU");
     }
 
     #[test]
