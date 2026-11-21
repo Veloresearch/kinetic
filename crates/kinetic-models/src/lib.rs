@@ -102,6 +102,7 @@ pub(crate) fn build<'a>(
     let folds = Folds::read(file.header())?;
     let family = arch::family(arch)
         .ok_or_else(|| LoadError(format!("architecture {arch} is not supported yet")))?;
+    l.refuse_weight_scales()?;
     let (Body::Decoder(build_layers) | Body::Bidirectional(build_layers)) = family.body else {
         return Err(LoadError(format!(
             "{arch} is an encoder; load it with Embedder"

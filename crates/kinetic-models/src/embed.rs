@@ -57,7 +57,10 @@ impl<'a> Embedder<'a> {
             .architecture()
             .ok_or_else(|| LoadError("file does not name its architecture".into()))?;
         let body = match arch::family(arch).map(|f| f.body) {
-            Some(arch::Body::Encoder(load)) => Body::Encoder(Box::new(load(&l, arch)?)),
+            Some(arch::Body::Encoder(load)) => {
+                l.refuse_weight_scales()?;
+                Body::Encoder(Box::new(load(&l, arch)?))
+            }
             Some(arch::Body::Bidirectional(_)) => {
                 Body::Bidirectional(Box::new(crate::build(file, &Default::default())?))
             }

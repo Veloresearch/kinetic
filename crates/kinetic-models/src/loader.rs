@@ -53,6 +53,25 @@ impl<'a> Loader<'a> {
         }
     }
 
+    /// Fails on the per-tensor scales llama.cpp multiplies a product, its
+    /// input or the cache by, such as the second scale of NVFP4 weights:
+    /// nothing here applies them, and the output would be wrong without.
+    pub fn refuse_weight_scales(&self) -> Result<(), LoadError> {
+        const SCALES: &[&str] = &[".scale", ".input_scale", ".k_scale", ".v_scale"];
+        match self
+            .header()
+            .tensors
+            .iter()
+            .find(|t| SCALES.iter().any(|s| t.name.ends_with(s)))
+        {
+            Some(t) => Err(LoadError(format!(
+                "tensor {} scales a weight, which is not supported yet",
+                t.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
     fn tensor(&self, name: &str) -> Result<&'a TensorInfo, LoadError> {
         self.header()
             .tensor(name)
@@ -155,5 +174,59 @@ impl<'a> Loader<'a> {
             activation: Activation::Silu,
             folding: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kinetic_gguf::TensorType;
+
+    use super::*;
+
+    struct Header(Gguf);
+
+    impl TensorSource for Header {
+        fn header(&self) -> &Gguf {
+            &self.0
+        }
+
+        fn tensor_data(&self, _: &TensorInfo) -> &[u8] {
+            &[]
+        }
+    }
+
+    fn file(names: &[&str]) -> Header {
+        Header(Gguf {
+            version: 3,
+            alignment: 32,
+            data_offset: 0,
+            metadata: Vec::new(),
+            tensors: names
+                .iter()
+                .map(|&name| TensorInfo {
+                    name: name.into(),
+                    dims: vec![1],
+                    ty: TensorType::F32,
+                    offset: 0,
+                    size: 4,
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn weight_scales_are_refused() {
+        let plain = file(&["blk.0.attn_q.weight", "blk.0.layer_output_scale.weight"]);
+        assert!(Loader::new(&plain).refuse_weight_scales().is_ok());
+        for name in [
+            "blk.0.attn_q.scale",
+            "blk.3.ffn_up_exps.input_scale",
+            "blk.0.attn_k.k_scale",
+            "output.scale",
+        ] {
+            let scaled = file(&["blk.0.attn_q.weight", name]);
+            let err = Loader::new(&scaled).refuse_weight_scales().unwrap_err();
+            assert!(err.0.contains(name), "{}", err.0);
+        }
     }
 }
