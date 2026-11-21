@@ -103,6 +103,7 @@ pub(crate) fn layers<'a>(l: &Loader<'a>, d: usize, eps: f32) -> Result<Vec<Layer
                 experts: None,
                 ffn_out_norm: Some(l.vector(&t("post_ffw_norm.weight"), d)?),
                 residual_scale: None,
+                output_scale: None,
             })
         })
         .collect()

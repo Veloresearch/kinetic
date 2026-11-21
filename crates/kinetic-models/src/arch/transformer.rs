@@ -183,6 +183,7 @@ pub(crate) fn layers<'a>(
                 experts: None,
                 ffn_out_norm: l.optional_vector(&t("post_ffw_norm.weight"), d)?,
                 residual_scale: None,
+                output_scale: None,
             })
         })
         .collect()

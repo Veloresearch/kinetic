@@ -220,5 +220,6 @@ fn layer<'a>(
         experts,
         ffn_out_norm: None,
         residual_scale: None,
+        output_scale: None,
     })
 }

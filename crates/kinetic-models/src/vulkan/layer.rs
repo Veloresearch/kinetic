@@ -68,6 +68,9 @@ impl VulkanLayer {
         if l.experts.is_some() {
             return Err(unsupported("routed experts"));
         }
+        if l.output_scale.is_some() {
+            return Err(unsupported("layer output scales"));
+        }
         let (Some(mixer_norm), Some(ffn_norm), Some(ffn)) = (&l.mixer_norm, &l.ffn_norm, &l.ffn)
         else {
             return Err(unsupported("layers without input norms"));

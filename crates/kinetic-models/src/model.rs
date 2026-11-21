@@ -23,6 +23,8 @@ pub(crate) struct Layer<'a> {
     /// Multiplies the mixer and feed-forward outputs before they join the
     /// residual stream.
     pub residual_scale: Option<f32>,
+    /// Multiplies the whole residual stream once the layer is done.
+    pub output_scale: Option<f32>,
 }
 
 impl Layer<'_> {
@@ -91,6 +93,9 @@ impl Layer<'_> {
         }
         norm(&mut ffn, &self.ffn_out_norm);
         add(x, &ffn);
+        if let Some(s) = self.output_scale {
+            x.iter_mut().for_each(|v| *v *= s);
+        }
     }
 }
 

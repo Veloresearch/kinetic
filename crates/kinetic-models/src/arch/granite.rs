@@ -108,6 +108,7 @@ pub(crate) fn layers<'a>(l: &Loader<'a>, d: usize, eps: f32) -> Result<Vec<Layer
                 experts,
                 ffn_out_norm: None,
                 residual_scale,
+                output_scale: None,
             })
         })
         .collect()
