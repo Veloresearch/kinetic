@@ -271,10 +271,10 @@ fn plain<'a>(
 
 /// Runs pp512 and tg128 (after `tests.depth` tokens) on `plain`, which
 /// never drafts, and the edit test on it and then, once `plain` is dropped,
-/// on the drafting backend that `drafting` makes.
+/// on a new drafting backend from `drafting` for every repetition.
 fn measure<P: Backend, D: Backend>(
     mut plain: P,
-    drafting: impl FnOnce() -> Result<D>,
+    drafting: impl Fn() -> Result<D>,
     model: &Model,
     edit: &[u32],
     tests: Tests,
@@ -332,8 +332,9 @@ fn measure<P: Backend, D: Backend>(
     };
     let (expected, _) = answer(&mut plain);
     drop(plain);
-    let mut drafting = drafting()?;
     for _ in 0..tests.repetitions {
+        // a fresh backend each time, so no run replays an earlier run's answer
+        let mut drafting = drafting()?;
         let (tokens, speed) = answer(&mut drafting);
         speeds.edit_identical &= tokens == expected;
         speeds.edit = speeds.edit.max(speed);
