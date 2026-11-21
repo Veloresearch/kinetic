@@ -26,6 +26,12 @@ const SKIPPED: &[&str] = &[
     "output_norm.weight",
 ];
 
+/// The controls of the query, key, value and feed-forward inputs of a looped
+/// layer, as ggml-org's files and as Unsloth's name them; the files Unsloth
+/// publishes in both layouts hold the same bytes under these names.
+const CONTROLS: [&str; 4] = ["q", "k", "v", "ffn"];
+const UNROLLED_CONTROLS: [&str; 4] = ["attn", "k", "v", "mlp"];
+
 /// What the layers of a network share beyond their weights: where they
 /// read their inputs from, and the loop.
 pub(crate) struct Network<'a> {
@@ -61,25 +67,76 @@ struct Wiring<'a> {
 
 fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
     let d = b.d;
-    // Unsloth's files count the unrolled loop in block_count and name the
-    // loop otherwise.
-    if ["num_loops", "loop.core_start"]
-        .iter()
-        .any(|k| l.header().arch_key(k).is_some())
-    {
-        return Err(LoadError(
-            "this Inkling 2 file stores its loop in a layout Kinetic does not read yet; \
-             use the GGUF from ggml-org/Inkling-2-Mini-GGUF"
-                .into(),
-        ));
+    let block = l.usize("attn_res.block_size")?;
+    let listed = l.usize("block_count")?;
+    // Unsloth's files count every pass of the core in block_count and in the
+    // per-layer arrays, store each physical layer once, and name the loop
+    // keys otherwise.
+    let unrolled = l.header().arch_key("num_loops").is_some();
+    let core = if unrolled {
+        Some(Core {
+            start: l.usize("loop.core_start")?,
+            end: l.usize("loop.core_end")?,
+            passes: l.usize("num_loops")?,
+        })
+    } else if l.header().arch_key("loop.start").is_some() {
+        Some(Core {
+            start: l.usize("loop.start")?,
+            end: l.usize("loop.end")?,
+            passes: l.usize("loop.count")?,
+        })
+    } else {
+        None
+    };
+    let n_phys = match &core {
+        Some(c) if unrolled => (c.end > c.start && c.passes > 0)
+            .then(|| listed.checked_sub((c.passes - 1) * (c.end - c.start)))
+            .flatten()
+            .ok_or_else(|| LoadError("Inkling 2 loop is out of range".into()))?,
+        _ => listed,
+    };
+    if let Some(c) = &core {
+        let varying = match l.hparam("loop.varying") {
+            Ok(v) => v
+                .as_bool()
+                .ok_or_else(|| LoadError("loop.varying is not a boolean".into()))?,
+            Err(_) => false,
+        };
+        if c.passes < if varying { 1 } else { 2 }
+            || c.start == 0
+            || c.start >= c.end
+            || c.end > n_phys
+            || !c.start.is_multiple_of(block)
+            || !c.end.is_multiple_of(block)
+        {
+            return Err(LoadError("Inkling 2 loop is out of range".into()));
+        }
     }
-    let n_phys = l.usize("block_count")?;
-    let per_layer = |key: &str| match l.hparam(key)? {
-        Value::Array(_) => l.array(key, n_phys, Value::as_u64),
-        v => v
-            .as_u64()
-            .map(|n| vec![n; n_phys])
-            .ok_or_else(|| LoadError(format!("{key} is not an integer"))),
+    // An unrolled array lists the later passes of the core after the
+    // physical layers; they must repeat the core.
+    let physical = |key: &str, values: Vec<Value>| -> Result<Vec<Value>, LoadError> {
+        if let Some(c) = core.as_ref().filter(|_| unrolled) {
+            let span = c.end - c.start;
+            if (n_phys..listed).any(|s| values[s] != values[c.start + (s - n_phys) % span]) {
+                return Err(LoadError(format!(
+                    "{key} differs between passes of the loop"
+                )));
+            }
+        }
+        Ok(values[..n_phys].to_vec())
+    };
+    let per_layer = |key: &str| -> Result<Vec<u64>, LoadError> {
+        let values = match l.hparam(key)? {
+            Value::Array(_) => l.array(key, listed, |v| Some(v.clone()))?,
+            v => vec![v.clone(); listed],
+        };
+        physical(key, values)?
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .ok_or_else(|| LoadError(format!("{key} is not an integer")))
+            })
+            .collect()
     };
     let n_head = per_layer("attention.head_count")?;
     let n_head_kv = per_layer("attention.head_count_kv")?;
@@ -99,7 +156,14 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
             "Inkling 2 with rotary positions is not supported yet".into(),
         ));
     }
-    let windowed = l.array("attention.sliding_window_pattern", n_phys, Value::as_bool)?;
+    let key = "attention.sliding_window_pattern";
+    let windowed = physical(key, l.array(key, listed, |v| Some(v.clone()))?)?
+        .iter()
+        .map(|v| {
+            v.as_bool()
+                .ok_or_else(|| LoadError(format!("{key} has an invalid value")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let n_vocab = l.usize("vocab_size")?;
     let unpadded = l.usize("vocab_size_unpadded")?;
     let p = Params {
@@ -125,7 +189,6 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
         weight_scale: l.f32_or("expert_weights_scale", 1.0)?,
         eps: b.eps,
     };
-    let block = l.usize("attn_res.block_size")?;
     let positive = [p.qk_clip, p.rel_clip, p.eps]
         .iter()
         .all(|v| v.is_finite() && *v > 0.0);
@@ -148,32 +211,6 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
         ));
     }
 
-    let core = match l.header().arch_key("loop.start") {
-        Some(_) => {
-            let core = Core {
-                start: l.usize("loop.start")?,
-                end: l.usize("loop.end")?,
-                passes: l.usize("loop.count")?,
-            };
-            let varying = match l.hparam("loop.varying") {
-                Ok(v) => v
-                    .as_bool()
-                    .ok_or_else(|| LoadError("loop.varying is not a boolean".into()))?,
-                Err(_) => false,
-            };
-            if core.passes < if varying { 1 } else { 2 }
-                || core.start == 0
-                || core.start >= core.end
-                || core.end > n_phys
-                || !core.start.is_multiple_of(block)
-                || !core.end.is_multiple_of(block)
-            {
-                return Err(LoadError("Inkling 2 loop is out of range".into()));
-            }
-            Some(core)
-        }
-        None => None,
-    };
     let rank = core
         .as_ref()
         .map(|_| l.usize("loop.gate_rank"))
@@ -197,6 +234,19 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
         }
     }
 
+    // Unsloth keeps the message queries of the whole core in two tables of
+    // two queries per layer: the query and feed-forward ones, and the key
+    // and value ones.
+    let unrolled_queries = match core.as_ref().filter(|_| unrolled) {
+        Some(c) => {
+            let n = 2 * (c.end - c.start);
+            Some((
+                table(l, "loop_res_query.weight", d, n)?,
+                table(l, "loop_kv_res_query.weight", d, n)?,
+            ))
+        }
+        None => None,
+    };
     let wiring = (0..n_phys)
         .map(|i| {
             let t = |s: &str| format!("blk.{i}.{s}");
@@ -207,25 +257,35 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
             };
             let looped = match (&core, rank) {
                 (Some(c), Some(rank)) if (c.start..c.end).contains(&i) => {
-                    let control = |x: &str| -> Result<Control<'a>, LoadError> {
+                    let name = |x: usize, part: &str| {
+                        if unrolled {
+                            t(&format!("loop_{}_{part}.weight", UNROLLED_CONTROLS[x]))
+                        } else {
+                            t(&format!("loop_{}_ctrl_{part}.weight", CONTROLS[x]))
+                        }
+                    };
+                    let control = |x: usize| -> Result<Control<'a>, LoadError> {
                         Ok(Control {
-                            down: l.matrix(
-                                &t(&format!("loop_{x}_ctrl_down.weight")),
-                                2 * d,
-                                rank,
-                            )?,
-                            gain: l.matrix(&t(&format!("loop_{x}_ctrl_gain.weight")), rank, d)?,
-                            forget: l.matrix(
-                                &t(&format!("loop_{x}_ctrl_forget.weight")),
-                                rank,
-                                d,
-                            )?,
+                            down: l.matrix(&name(x, "down"), 2 * d, rank)?,
+                            gain: l.matrix(&name(x, "gain"), rank, d)?,
+                            forget: l.matrix(&name(x, "forget"), rank, d)?,
                         })
                     };
-                    Some((
-                        table(l, &t("loop_msg_query.weight"), d, 4)?,
-                        [control("q")?, control("k")?, control("v")?, control("ffn")?],
-                    ))
+                    let query = match &unrolled_queries {
+                        Some((res, kv)) => {
+                            let j = i - c.start;
+                            let row = |table: &[f32], r: usize| table[r * d..][..d].to_vec();
+                            [
+                                row(res, 2 * j),
+                                row(kv, 2 * j),
+                                row(kv, 2 * j + 1),
+                                row(res, 2 * j + 1),
+                            ]
+                            .concat()
+                        }
+                        None => table(l, &t("loop_msg_query.weight"), d, 4)?,
+                    };
+                    Some((query, [control(0)?, control(1)?, control(2)?, control(3)?]))
                 }
                 _ => None,
             };

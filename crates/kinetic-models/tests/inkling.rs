@@ -136,15 +136,11 @@ fn tiny_tensors() -> Vec<(String, Vec<u64>)> {
     t
 }
 
-fn tiny_model() -> Memory {
-    let arch = "inkling2_loop";
-    let per_layer = |v: Value| Value::Array(vec![v; N_PHYS]);
-    let mut metadata = vec![(
-        "general.architecture".to_string(),
-        Value::String(arch.into()),
-    )];
-    let keys = [
-        ("block_count", Value::U32(N_PHYS as u32)),
+/// Hyperparameters of the tiny model, without those of its loop.
+fn tiny_keys(slots: usize) -> Vec<(&'static str, Value)> {
+    let per_layer = |v: Value| Value::Array(vec![v; slots]);
+    vec![
+        ("block_count", Value::U32(slots as u32)),
         ("context_length", Value::U32(64)),
         ("embedding_length", Value::U32(D as u32)),
         ("feed_forward_length", Value::U32(4)),
@@ -162,7 +158,7 @@ fn tiny_model() -> Memory {
         ("attention.sliding_window", Value::U32(2)),
         (
             "attention.sliding_window_pattern",
-            Value::Array((0..N_PHYS).map(|i| Value::Bool(i % 2 == 0)).collect()),
+            Value::Array((0..slots).map(|i| Value::Bool(i % 2 == 0)).collect()),
         ),
         ("shortconv.l_cache", Value::U32(3)),
         ("expert_weights_scale", Value::F32(2.0)),
@@ -176,17 +172,40 @@ fn tiny_model() -> Memory {
         ("attention.relative_clip", Value::F32(0.8)),
         ("attention.log_scale_floor", Value::U32(2)),
         ("attention.log_scale_alpha", Value::F32(0.5)),
-        ("loop.start", Value::U32(LOOP.start as u32)),
-        ("loop.end", Value::U32(LOOP.end as u32)),
-        ("loop.count", Value::U32(2)),
         ("loop.gate_rank", Value::U32(3)),
-        ("loop.varying", Value::Bool(false)),
-    ];
+    ]
+}
+
+/// The tiny model's tensors with their values, the same in the NumPy
+/// script the expected logits come from.
+fn tiny_weights() -> Vec<(String, Vec<u64>, Vec<f32>)> {
+    tiny_tensors()
+        .into_iter()
+        .enumerate()
+        .map(|(k, (name, dims))| {
+            let n: u64 = dims.iter().product();
+            let shift = if name.contains("norm") || name.contains("_clip") {
+                1.0
+            } else {
+                0.0
+            };
+            let values = (0..n as usize)
+                .map(|i| (((i * (2 * k + 3)) % 17) as f32 - 8.0) * 0.07 + shift)
+                .collect();
+            (name, dims, values)
+        })
+        .collect()
+}
+
+fn write(arch: &str, keys: Vec<(&str, Value)>, tensors: &[(String, Vec<u64>, Vec<f32>)]) -> Memory {
+    let mut metadata = vec![(
+        "general.architecture".to_string(),
+        Value::String(arch.into()),
+    )];
     metadata.extend(keys.into_iter().map(|(k, v)| (format!("{arch}.{k}"), v)));
-    let tensors = tiny_tensors();
     let out: Vec<TensorOut> = tensors
         .iter()
-        .map(|(name, dims)| TensorOut {
+        .map(|(name, dims, _)| TensorOut {
             name: name.clone(),
             dims: dims.clone(),
             ty: TensorType::F32,
@@ -194,23 +213,71 @@ fn tiny_model() -> Memory {
         .collect();
     let mut bytes = Vec::new();
     kinetic_gguf::write(&mut bytes, &metadata, &out, |k| {
-        let (name, dims) = &tensors[k];
-        let n: u64 = dims.iter().product();
-        let shift = if name.contains("norm") || name.contains("_clip") {
-            1.0
-        } else {
-            0.0
-        };
-        Ok((0..n as usize)
-            .map(|i| ((i * (2 * k + 3)) % 17) as f32 - 8.0)
-            .flat_map(|v| (v * 0.07 + shift).to_le_bytes())
-            .collect())
+        Ok(tensors[k].2.iter().flat_map(|v| v.to_le_bytes()).collect())
     })
     .unwrap();
     Memory {
         header: Gguf::parse(&bytes).unwrap(),
         bytes,
     }
+}
+
+fn tiny_model() -> Memory {
+    let mut keys = tiny_keys(N_PHYS);
+    keys.extend([
+        ("loop.start", Value::U32(LOOP.start as u32)),
+        ("loop.end", Value::U32(LOOP.end as u32)),
+        ("loop.count", Value::U32(2)),
+        ("loop.varying", Value::Bool(false)),
+    ]);
+    write("inkling2_loop", keys, &tiny_weights())
+}
+
+/// The tiny model as Unsloth lays it out: `inkling2` with every pass of the
+/// core in `block_count` and the per-layer arrays, its own loop keys, the
+/// controls named `attn`, `k`, `v` and `mlp`, and the message queries of
+/// all core layers in two tables. The renaming is what the bytes of
+/// Unsloth's files and of their copies in Mainline_Support show.
+fn unrolled_model() -> Memory {
+    let mut keys = tiny_keys(N_PHYS + LOOP.len());
+    keys.extend([
+        ("num_loops", Value::U32(2)),
+        ("loop.core_start", Value::U32(LOOP.start as u32)),
+        ("loop.core_end", Value::U32(LOOP.end as u32)),
+    ]);
+    let mut tensors = Vec::new();
+    let (mut res, mut kv) = (Vec::new(), Vec::new());
+    for (name, dims, values) in tiny_weights() {
+        if name.ends_with("loop_msg_query.weight") {
+            let q = |j: usize| &values[j * D as usize..][..D as usize];
+            res.extend([q(0), q(3)].concat());
+            kv.extend([q(1), q(2)].concat());
+            continue;
+        }
+        let renamed = ["q", "k", "v", "ffn"]
+            .into_iter()
+            .zip(["attn", "k", "v", "mlp"])
+            .fold(name, |n, (from, to)| {
+                n.replace(&format!("loop_{from}_ctrl_"), &format!("loop_{to}_"))
+            });
+        tensors.push((renamed, dims, values));
+    }
+    let rows = 2 * LOOP.len() as u64;
+    tensors.push(("loop_res_query.weight".into(), vec![D, rows], res));
+    tensors.push(("loop_kv_res_query.weight".into(), vec![D, rows], kv));
+    write("inkling2", keys, &tensors)
+}
+
+fn logits(model: &kinetic_models::Model, batches: &[usize]) -> Vec<f32> {
+    let tokens = [3, 7, 1, 9];
+    let mut state = model.new_state();
+    let mut logits = Vec::new();
+    let mut at = 0;
+    for &n in batches {
+        logits.extend(model.run(&mut state, &tokens[at..at + n], true).logits);
+        at += n;
+    }
+    logits
 }
 
 /// Logits of the tiny model after each of the tokens 3, 7, 1 and 9,
@@ -223,16 +290,9 @@ fn tiny_model_matches_the_reference() {
     let model = kinetic_models::load(&file).unwrap();
     assert_eq!(model.n_layers(), N_PHYS + LOOP.len());
     assert_eq!(model.n_vocab(), 10);
-    let tokens = [3, 7, 1, 9];
     let mut first: Option<Vec<f32>> = None;
     for batches in [&[4][..], &[2, 1, 1], &[1, 1, 1, 1]] {
-        let mut state = model.new_state();
-        let mut logits = Vec::new();
-        let mut at = 0;
-        for &n in batches {
-            logits.extend(model.run(&mut state, &tokens[at..at + n], true).logits);
-            at += n;
-        }
+        let logits = logits(&model, batches);
         for (i, (got, want)) in logits.iter().zip(LOGITS).enumerate() {
             assert!(
                 (got - want).abs() < 1e-4,
@@ -244,18 +304,37 @@ fn tiny_model_matches_the_reference() {
     }
 }
 
-/// Unsloth's files, which unroll the loop in `block_count`, are refused
-/// plainly rather than failing on a layer they do not store.
+/// Unsloth's layout of the same weights gives the same logits, bit for bit.
 #[test]
-fn the_unrolled_layout_is_refused() {
-    let mut file = tiny_model();
-    file.header
+fn the_unrolled_layout_runs_the_same_model() {
+    let unrolled = unrolled_model();
+    let looped = tiny_model();
+    let model = kinetic_models::load(&unrolled).unwrap();
+    assert_eq!(model.n_layers(), N_PHYS + LOOP.len());
+    let want = logits(&kinetic_models::load(&looped).unwrap(), &[4]);
+    assert_eq!(logits(&model, &[4]), want);
+}
+
+/// An unrolled array whose later passes do not repeat the core is refused.
+#[test]
+fn an_unrolled_array_must_repeat_the_core() {
+    let mut file = unrolled_model();
+    let key = "inkling2.attention.sliding_window_pattern";
+    let (_, v) = file
+        .header
         .metadata
-        .push(("inkling2_loop.num_loops".into(), Value::U32(3)));
+        .iter_mut()
+        .find(|(k, _)| k == key)
+        .unwrap();
+    *v = Value::Array(
+        (0..N_PHYS + LOOP.len())
+            .map(|i| Value::Bool(i < 7))
+            .collect(),
+    );
     let Err(e) = kinetic_models::load(&file) else {
-        panic!("the unrolled layout loaded")
+        panic!("a mismatched pattern loaded")
     };
-    assert!(e.0.contains("ggml-org/Inkling-2-Mini-GGUF"), "{e}");
+    assert!(e.0.contains("differs between passes"), "{e}");
 }
 
 const LOGITS: [f32; 40] = [
