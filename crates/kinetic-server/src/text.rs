@@ -84,8 +84,20 @@ pub struct ThinkSplitter {
     calls: &'static [&'static str],
     /// Whitespace at the start of a part is dropped until text arrives.
     at_start: bool,
+    /// The content so far ends at the start of a line, blanks aside.
+    line_start: bool,
     pending: String,
 }
+
+/// A closing tag outside reasoning that stands alone on its line.
+enum Stray {
+    None,
+    At(usize),
+    /// Nothing follows the tag yet, so its line may still go on.
+    Unsure(usize),
+}
+
+const BLANKS: [char; 2] = [' ', '\t'];
 
 impl ThinkSplitter {
     /// `thinking` says whether the prompt left a `<think>` block open.
@@ -94,8 +106,30 @@ impl ThinkSplitter {
             thinking: thinking.then_some(THINK_CLOSE),
             calls: &[],
             at_start: true,
+            line_start: true,
             pending: String::new(),
         }
+    }
+
+    /// The first closing tag in the pending text that has a line to itself.
+    /// Outside reasoning some models still write one, before the answer or
+    /// between two answers, and it is not shown; a tag inside a line is
+    /// text the answer meant to write.
+    fn stray(&self) -> Stray {
+        for (at, tag) in self.pending.match_indices(THINK_CLOSE) {
+            let before = self.pending[..at].trim_end_matches(BLANKS);
+            let opens_line = match before.is_empty() {
+                true => self.line_start || self.at_start,
+                false => before.ends_with('\n'),
+            };
+            let after = self.pending[at + tag.len()..].trim_start_matches(BLANKS);
+            match opens_line {
+                true if after.is_empty() => return Stray::Unsure(at),
+                true if after.starts_with(['\n', '\r']) => return Stray::At(at),
+                _ => {}
+            }
+        }
+        Stray::None
     }
 
     /// Ends reasoning at the start of a tool call too, for a request that
@@ -123,17 +157,15 @@ impl ThinkSplitter {
     pub fn push(&mut self, text: &str) -> Split {
         self.pending.push_str(text);
         let mut out = Split::default();
-        // with reasoning off some models still open the answer with a bare
-        // closing tag; it is not part of the answer
-        if self.thinking.is_none() && self.at_start {
-            let rest = self.pending.trim_start();
-            if let Some(after) = rest.strip_prefix(THINK_CLOSE) {
-                self.pending = after.to_owned();
-            } else if !rest.is_empty() && THINK_CLOSE.starts_with(rest) {
-                return out;
-            }
-        }
         loop {
+            let stray = match self.thinking {
+                Some(_) => Stray::None,
+                None => self.stray(),
+            };
+            let dropped = match stray {
+                Stray::At(at) => Some((at, THINK_CLOSE.len(), None)),
+                _ => None,
+            };
             let found = match self.thinking {
                 Some(close) => self.reasoning_end(close).map(|(at, len)| (at, len, None)),
                 None => THINK_TAGS
@@ -143,6 +175,7 @@ impl ThinkSplitter {
                             .find(open)
                             .map(|at| (at, open.len(), Some(close)))
                     })
+                    .chain(dropped)
                     .min_by_key(|&(at, ..)| at),
             };
             match found {
@@ -151,8 +184,10 @@ impl ThinkSplitter {
                     self.pending.truncate(at);
                     let part = std::mem::replace(&mut self.pending, rest);
                     self.emit(&part, &mut out);
+                    // a stray tag keeps the blank space around it, which
+                    // still separates the text on either side
+                    self.at_start |= self.thinking.is_some() || next.is_some();
                     self.thinking = next;
-                    self.at_start = true;
                 }
                 None => {
                     let hold = match self.thinking {
@@ -163,9 +198,15 @@ impl ThinkSplitter {
                             .unwrap_or(0),
                         None => THINK_TAGS
                             .iter()
-                            .map(|&(open, _)| partial_suffix(&self.pending, open))
+                            .map(|&(open, _)| open)
+                            .chain([THINK_CLOSE])
+                            .map(|tag| partial_suffix(&self.pending, tag))
                             .max()
                             .unwrap_or(0),
+                    };
+                    let hold = match stray {
+                        Stray::Unsure(at) => hold.max(self.pending.len() - at),
+                        _ => hold,
                     };
                     let rest = self.pending.split_off(self.pending.len() - hold);
                     let part = std::mem::replace(&mut self.pending, rest);
@@ -179,6 +220,10 @@ impl ThinkSplitter {
     /// Whatever was held back, once the output has ended.
     pub fn finish(&mut self) -> Split {
         let mut out = Split::default();
+        // a tag that ends the output had its line to itself after all
+        if let (None, Stray::Unsure(at)) = (self.thinking, self.stray()) {
+            self.pending.truncate(at);
+        }
         let part = std::mem::take(&mut self.pending);
         self.emit(&part, &mut out);
         out
@@ -192,6 +237,10 @@ impl ThinkSplitter {
         let target = if self.thinking.is_some() {
             &mut out.reasoning
         } else {
+            let text = part.trim_end_matches(BLANKS);
+            if !text.is_empty() {
+                self.line_start = text.ends_with('\n');
+            }
             &mut out.content
         };
         target.push_str(part);
@@ -278,8 +327,34 @@ mod tests {
     fn a_bare_closing_tag_before_the_answer_is_dropped() {
         let s = feed_think(false, &["</thi", "nk>\n\nHello"]);
         assert_eq!((s.reasoning.as_str(), s.content.as_str()), ("", "Hello"));
-        let s = feed_think(false, &["Use </think> in text"]);
+    }
+
+    #[test]
+    fn a_closing_tag_alone_on_its_line_is_dropped() {
+        let s = feed_think(
+            false,
+            &["Paris.\n</th", "ink>\n\nParis is", " the capital."],
+        );
+        assert_eq!(s.content, "Paris.\n\n\nParis is the capital.");
+        let s = feed_think(false, &["Paris.\n  </think>", " \r\nMore"]);
+        assert_eq!(s.content, "Paris.\n   \r\nMore");
+        let s = feed_think(false, &["Paris.\n</think>"]);
+        assert_eq!(s.content, "Paris.\n");
+    }
+
+    #[test]
+    fn a_closing_tag_inside_a_line_is_text() {
+        let s = feed_think(false, &["Use </thi", "nk> in text"]);
         assert_eq!(s.content, "Use </think> in text");
+        let s = feed_think(false, &["<think>a</think>b</think>c"]);
+        assert_eq!(
+            (s.reasoning.as_str(), s.content.as_str()),
+            ("a", "b</think>c")
+        );
+        let s = feed_think(false, &["a\n</think>", " tail\n"]);
+        assert_eq!(s.content, "a\n</think> tail\n");
+        let s = feed_think(false, &["x </thi"]);
+        assert_eq!(s.content, "x </thi");
     }
 
     #[test]
