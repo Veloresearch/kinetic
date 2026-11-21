@@ -114,6 +114,8 @@ pub fn measure(bench: &Path, model: &Path, on_gpu: bool, s: &Settings) -> Result
         speeds: Speeds {
             prompt: best("n_prompt"),
             generate: best("n_gen"),
+            // without the prompt cache each request drafts from itself alone, so a repeat runs as the first
+            first_edit: edit,
             edit,
         },
         version,

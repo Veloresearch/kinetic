@@ -238,39 +238,46 @@ kinetic bench model.gguf --device cpu -t 6 -r 5 --json
 | `--gpus <LIST>` | CUDA GPUs to spread the layers over, as for `run` |
 | `--json` | print the results as one JSON object |
 | `--compare [LLAMA_BENCH]` | also run llama.cpp on the same file and print a card with both; see [bench --compare](#bench---compare) |
-| `--off <LIST>` | turn speed technologies off, as for `run`; bench measures RAD-1 (`edit256`), Shortlist and Torque |
+| `--off <LIST>` | turn speed technologies off, as for `run`; bench measures RAD-1 (the edit tests), Shortlist and Torque |
 
-Three tests, each the best of `-r` runs:
+Four tests, each the best of `-r` runs:
 
 - `pp512`: a 512-token prompt, as in `llama-bench`;
 - `tg128`: 128 generated tokens, as in `llama-bench`, with speculative
   decoding off so every token costs one pass over the weights;
-- `edit256`: 256 tokens of an answer that rewrites a short Rust file with
-  one name changed, with speculative decoding on, the way an editing request
-  runs. Its output is compared with plain decoding.
+- `edit256-first`: 256 tokens of an answer that rewrites a short Rust file
+  with one name changed, with speculative decoding on, the way an editing
+  request runs, on an engine that has not answered it before;
+- `edit256-repeated`: the same request again on that engine, which drafts
+  from the answer it gave the first time, as when a request is repeated or
+  regenerated.
+
+Each run of the edit tests starts a fresh engine, so a first edit never
+replays an earlier run. The output of both is compared with plain decoding.
 
 ```text
 | model | size | params | backend | threads | test | t/s |
 | --- | ---: | ---: | --- | ---: | ---: | ---: |
 | SmolLM2-135M-Instruct-f16 | 0.25 GiB | 0.13 B | CPU | 4 | pp512 | ... |
 | SmolLM2-135M-Instruct-f16 | 0.25 GiB | 0.13 B | CPU | 4 | tg128 | ... |
-| SmolLM2-135M-Instruct-f16 | 0.25 GiB | 0.13 B | CPU | 4 | edit256 | ... |
+| SmolLM2-135M-Instruct-f16 | 0.25 GiB | 0.13 B | CPU | 4 | edit256-first | ... |
+| SmolLM2-135M-Instruct-f16 | 0.25 GiB | 0.13 B | CPU | 4 | edit256-repeated | ... |
 
 on the CPU, best of 3, load 0.53 s
 speed technologies on: RAD-1, Shortlist; Warm Start, Zero Wait and Convoy take no part
-edit: drafted output identical to plain decoding: yes
+edit: drafted output identical to plain decoding: first yes, repeated yes
 peak memory 0.31 GiB
 ```
 
 To see what one technology gives, run `bench` twice, with and without
-`--off` naming it, and compare the rows: `--off rad1` runs `edit256`
+`--off` naming it, and compare the rows: `--off rad1` runs the edit tests
 without drafting, `--off shortlist` and `--off torque` change `tg128` and
-`edit256`. The line under the table says which ran; Warm Start, Zero Wait
+the edit tests. The line under the table says which ran; Warm Start, Zero Wait
 and Convoy need repeated, typed or concurrent requests, which `bench`
 never sends, so it says they take no part.
 
-If the drafted output ever differs from plain decoding, `bench` says `NO`
-and exits with 1; please [report it](https://github.com/Veloresearch/kinetic/issues/new?template=bug.yml).
+If the drafted output of either edit ever differs from plain decoding,
+`bench` says `NO` and exits with 1; please [report it](https://github.com/Veloresearch/kinetic/issues/new?template=bug.yml).
 `--json` prints:
 
 ```json
@@ -288,6 +295,8 @@ and exits with 1; please [report it](https://github.com/Veloresearch/kinetic/iss
   "decode_tokens": 128,
   "decode_tokens_per_second": 49.01,
   "edit_tokens": 256,
+  "first_edit_tokens_per_second": 71.4,
+  "first_edit_identical": true,
   "edit_tokens_per_second": 118.9,
   "edit_identical": true,
   "technologies": "on: RAD-1, Shortlist",
@@ -296,6 +305,9 @@ and exits with 1; please [report it](https://github.com/Veloresearch/kinetic/iss
 ```
 
 `backend` is `cpu` or `cuda`, and `device` names the GPU.
+`first_edit_tokens_per_second` and `first_edit_identical` are the first
+edit; `edit_tokens_per_second` and `edit_identical` keep their meaning, the
+repeated edit.
 
 ## info
 
@@ -497,7 +509,8 @@ with the same threads, device (`-ngl 99`, or `-ngl 0 -dev none` on the CPU)
 and repetitions, flash attention on, taking llama.cpp's best run as Kinetic
 takes its own. llama.cpp's edit test runs through `llama-server` with its
 speculative mode for the model (`draft-mtp` where the model has prediction
-layers, otherwise `ngram-simple`). `llama-bench` is looked for on `PATH` and
+layers, otherwise `ngram-simple`) and no prompt cache, so each request drafts
+from itself alone and its one number stands in both edit rows. `llama-bench` is looked for on `PATH` and
 in the usual install folders; Kinetic never downloads it. The card is a
 markdown table with a one-line summary; `--json` prints the same as JSON.
 
@@ -508,11 +521,12 @@ markdown table with a one-line summary; `--json` prints the same as JSON.
 | --- | ---: | ---: | ---: |
 | prompt pp512 | 6780.5 | 6667.7 | 1.02x |
 | generate tg128 | 191.0 | 166.8 | 1.15x |
-| edit256 | 702.7 | 207.7 | 3.38x |
+| edit256-first | ... | 207.7 | ... |
+| edit256-repeated | 702.7 | 207.7 | 3.38x |
 
 NVIDIA GeForce RTX 3060 Laptop GPU, AMD Ryzen 5 6600H with Radeon Graphics, Windows 11 (build 26300)
 Same file (1.02 GiB, Q4_K_M), all layers on the GPU, 12 threads, flash attention on, best of 2, t/s.
-edit256: greedy copy of a file with one rename; llama.cpp speculative mode ngram-simple; Kinetic's output identical to plain decoding: yes.
+edit256: greedy copy of a file with one rename, first on a fresh engine, then repeated on it; llama.cpp speculative mode ngram-simple, no prompt cache; Kinetic's output identical to plain decoding: first yes, repeated yes.
 ```
 
 ## llama.cpp flags

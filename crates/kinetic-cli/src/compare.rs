@@ -29,6 +29,8 @@ pub struct Settings {
 pub struct Speeds {
     pub prompt: f64,
     pub generate: f64,
+    /// The edit on a fresh engine, and repeated on the same one.
+    pub first_edit: Option<f64>,
     pub edit: Option<f64>,
 }
 
@@ -49,8 +51,10 @@ pub fn run(model: &Local, llama_bench: &Path, settings: &Settings, as_json: bool
         kinetic: Speeds {
             prompt: number(&kinetic["prefill_tokens_per_second"])?,
             generate: number(&kinetic["decode_tokens_per_second"])?,
+            first_edit: kinetic["first_edit_tokens_per_second"].as_f64(),
             edit: kinetic["edit_tokens_per_second"].as_f64(),
         },
+        first_edit_identical: kinetic["first_edit_identical"].as_bool().unwrap_or(false),
         edit_identical: kinetic["edit_identical"].as_bool().unwrap_or(false),
         llama,
     };

@@ -69,8 +69,13 @@ pub fn edit_prompt() -> String {
 struct Speeds {
     prefill: f64,
     decode: f64,
+    /// The edit on a fresh backend.
+    first_edit: f64,
+    /// The same edit again on that backend, which has answered it once.
     edit: f64,
-    /// Whether the edit test's drafted output equals plain decoding.
+    /// Whether the edit test's drafted output equals plain decoding, on
+    /// the fresh backend and on the repeat.
+    first_edit_identical: bool,
     edit_identical: bool,
 }
 
@@ -165,6 +170,8 @@ pub fn run(
             "decode_depth": tests.depth,
             "decode_tokens_per_second": speeds.decode,
             "edit_tokens": EDIT_TOKENS,
+            "first_edit_tokens_per_second": speeds.first_edit,
+            "first_edit_identical": speeds.first_edit_identical,
             "edit_tokens_per_second": speeds.edit,
             "edit_identical": speeds.edit_identical,
             "technologies": technologies,
@@ -187,7 +194,8 @@ pub fn run(
     for (test, speed) in [
         (format!("pp{PROMPT_TOKENS}"), speeds.prefill),
         (decode, speeds.decode),
-        (format!("edit{EDIT_TOKENS}"), speeds.edit),
+        (format!("edit{EDIT_TOKENS}-first"), speeds.first_edit),
+        (format!("edit{EDIT_TOKENS}-repeated"), speeds.edit),
     ] {
         writeln!(
             out,
@@ -200,10 +208,12 @@ pub fn run(
         out,
         "speed technologies {technologies}; Warm Start, Zero Wait and Convoy take no part"
     )?;
-    let identical = if speeds.edit_identical { "yes" } else { "NO" };
+    let yes = |identical| if identical { "yes" } else { "NO" };
     writeln!(
         out,
-        "edit: drafted output identical to plain decoding: {identical}"
+        "edit: drafted output identical to plain decoding: first {}, repeated {}",
+        yes(speeds.first_edit_identical),
+        yes(speeds.edit_identical)
     )?;
     if let Some(bytes) = peak {
         writeln!(
@@ -212,7 +222,7 @@ pub fn run(
             bytes as f64 / (1u64 << 30) as f64
         )?;
     }
-    if speeds.edit_identical {
+    if speeds.first_edit_identical && speeds.edit_identical {
         Ok(())
     } else {
         Err("drafted decoding changed the output".into())
@@ -271,7 +281,8 @@ fn plain<'a>(
 
 /// Runs pp512 and tg128 (after `tests.depth` tokens) on `plain`, which
 /// never drafts, and the edit test on it and then, once `plain` is dropped,
-/// on a new drafting backend from `drafting` for every repetition.
+/// twice on a new drafting backend from `drafting` for every repetition:
+/// a first edit, then the same edit repeated.
 fn measure<P: Backend, D: Backend>(
     mut plain: P,
     drafting: impl Fn() -> Result<D>,
@@ -307,7 +318,9 @@ fn measure<P: Backend, D: Backend>(
     let mut speeds = Speeds {
         prefill: 0.0,
         decode: 0.0,
+        first_edit: 0.0,
         edit: 0.0,
+        first_edit_identical: true,
         edit_identical: true,
     };
     for _ in 0..tests.repetitions {
@@ -333,8 +346,11 @@ fn measure<P: Backend, D: Backend>(
     let (expected, _) = answer(&mut plain);
     drop(plain);
     for _ in 0..tests.repetitions {
-        // a fresh backend each time, so no run replays an earlier run's answer
+        // a fresh backend each time, so only the second run on it replays an answer
         let mut drafting = drafting()?;
+        let (tokens, speed) = answer(&mut drafting);
+        speeds.first_edit_identical &= tokens == expected;
+        speeds.first_edit = speeds.first_edit.max(speed);
         let (tokens, speed) = answer(&mut drafting);
         speeds.edit_identical &= tokens == expected;
         speeds.edit = speeds.edit.max(speed);

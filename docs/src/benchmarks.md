@@ -25,8 +25,17 @@ and the results on our reference machines.
   over the time from the first to the last token, measured on the client the
   same way for both. Both answers are greedy, so they should be identical;
   the script reports whether they are.
-- **Exactness is checked, not assumed.** `kinetic bench` also runs its own
-  edit test and fails if drafted output differs from plain decoding.
+- **First and repeated edits.** `kinetic bench` runs its own edit test
+  twice per repetition: on a fresh engine (`edit256-first`, the first time
+  a request is seen) and again on the same engine (`edit256-repeated`, as
+  when a request is regenerated), where Kinetic also drafts from the answer
+  it gave before. Each repetition starts a fresh engine, so a first edit
+  never replays an earlier run. In `--json` they are
+  `first_edit_tokens_per_second` and `edit_tokens_per_second`. llama.cpp's
+  speculative decoding drafts from the request alone, so it has one edit
+  number for both.
+- **Exactness is checked, not assumed.** `kinetic bench` fails if the
+  drafted output of either edit differs from plain decoding.
 - **A quiet machine.** No other programs using the CPU or the GPU, laptops
   on mains power with the performance power plan, best of three runs.
 
