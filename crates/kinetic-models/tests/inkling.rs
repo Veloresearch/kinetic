@@ -244,6 +244,20 @@ fn tiny_model_matches_the_reference() {
     }
 }
 
+/// Unsloth's files, which unroll the loop in `block_count`, are refused
+/// plainly rather than failing on a layer they do not store.
+#[test]
+fn the_unrolled_layout_is_refused() {
+    let mut file = tiny_model();
+    file.header
+        .metadata
+        .push(("inkling2_loop.num_loops".into(), Value::U32(3)));
+    let Err(e) = kinetic_models::load(&file) else {
+        panic!("the unrolled layout loaded")
+    };
+    assert!(e.0.contains("ggml-org/Inkling-2-Mini-GGUF"), "{e}");
+}
+
 const LOGITS: [f32; 40] = [
     1.337009, 0.8481389, -0.7500277, -1.971547, 0.6931028, 0.5891846, -2.125962, 1.414415,
     0.4340913, -0.6725019, -0.4141479, 0.8115726, -1.191427, -0.212345, 0.7890617, 0.707845,

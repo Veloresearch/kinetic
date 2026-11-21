@@ -61,6 +61,18 @@ struct Wiring<'a> {
 
 fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
     let d = b.d;
+    // Unsloth's files count the unrolled loop in block_count and name the
+    // loop otherwise.
+    if ["num_loops", "loop.core_start"]
+        .iter()
+        .any(|k| l.header().arch_key(k).is_some())
+    {
+        return Err(LoadError(
+            "this Inkling 2 file stores its loop in a layout Kinetic does not read yet; \
+             use the GGUF from ggml-org/Inkling-2-Mini-GGUF"
+                .into(),
+        ));
+    }
     let n_phys = l.usize("block_count")?;
     let per_layer = |key: &str| match l.hparam(key)? {
         Value::Array(_) => l.array(key, n_phys, Value::as_u64),
