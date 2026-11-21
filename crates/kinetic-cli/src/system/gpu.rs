@@ -147,6 +147,8 @@ fn vulkan() -> Result<Vec<Gpu>, String> {
         .map_err(|e| e.to_string())?;
     Ok(devices
         .iter()
+        // a software renderer such as llvmpipe is the CPU, not a GPU to fix
+        .filter(|d| d.info().kind != kinetic_vulkan::DeviceKind::Cpu)
         .map(|d| {
             let info = d.info();
             let (major, minor, patch) = info.api_version;
