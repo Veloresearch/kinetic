@@ -53,7 +53,9 @@
 //! ```
 //!
 //! where `UPPER` is `[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]` and `LOWER` is
-//! `[\p{Ll}\p{Lm}\p{Lo}\p{M}]`.
+//! `[\p{Ll}\p{Lm}\p{Lo}\p{M}]`. The GPT-4o pattern, which Inkling 2 uses,
+//! is the same with `(?i:'s|'t|'re|'ve|'m|'ll|'d)?` after both kinds of
+//! word and `\p{N}{1,3}` for numbers.
 
 use crate::unicode::{classify, is_han_or_kana, is_punctuation_or_symbol, letter_case, Class};
 
@@ -71,6 +73,7 @@ pub(crate) enum Pattern {
     },
     Hunyuan,
     Tekken,
+    Gpt4o,
 }
 
 /// `qwen35`: marks join words, digits stand alone.
@@ -105,6 +108,9 @@ pub(crate) const HUNYUAN: Pattern = Pattern::Hunyuan;
 /// `tekken` and `pixtral`.
 pub(crate) const TEKKEN: Pattern = Pattern::Tekken;
 
+/// `inkling2`.
+pub(crate) const GPT4O: Pattern = Pattern::Gpt4o;
+
 impl Pattern {
     pub(crate) fn split(self, text: &str) -> Pieces<'_> {
         Pieces {
@@ -123,8 +129,38 @@ impl Pattern {
             Pattern::Gpt2 { digits_alone } => gpt2_len(s, digits_alone),
             Pattern::Hunyuan => hunyuan_len(s),
             Pattern::Tekken => tekken_len(s),
+            Pattern::Gpt4o => gpt4o_len(s),
         }
     }
+}
+
+/// The Tekken pattern with contractions after words and up to three
+/// digits per piece.
+fn gpt4o_len(s: &str) -> usize {
+    let first = s.chars().next().expect("match_len needs text");
+    let first_len = first.len_utf8();
+    let class = classify(first);
+    let may_lead = !matches!(class, Class::Letter | Class::Number | Class::Newline);
+    for word in [upper_then_lower, upper_then_any_lower] {
+        let led = may_lead
+            .then(|| word(&s[first_len..]).map(|len| first_len + len))
+            .flatten();
+        if let Some(len) = led.or_else(|| word(s)) {
+            let suffix = s[len..]
+                .strip_prefix('\'')
+                .and_then(|rest| contraction(rest.as_bytes(), true));
+            return len + suffix.map_or(0, |n| 1 + n);
+        }
+    }
+    if class == Class::Number {
+        return s
+            .char_indices()
+            .take(3)
+            .take_while(|&(_, c)| classify(c) == Class::Number)
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+    }
+    tekken_len(s)
 }
 
 fn tekken_len(s: &str) -> usize {

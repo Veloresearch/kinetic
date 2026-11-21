@@ -1,0 +1,89 @@
+Hello world
+__ggml_vocab_test__
+ Hello World!
+__ggml_vocab_test__
+HELLO WORLD
+__ggml_vocab_test__
+camelCaseIdentifier and PascalCase and snake_case_name
+__ggml_vocab_test__
+HTTPServer XMLHttpRequest getURLForID iPhone McDonald
+__ggml_vocab_test__
+ALLCAPSwordsThenLower ABCdef aBC
+__ggml_vocab_test__
+1234567890 3.14159 1,000,000 v2.0.1 0x1F
+__ggml_vocab_test__
+a1b2c3 x86_64 2024-11-21T12:00:00Z
+__ggml_vocab_test__
+Hello,
+world!
+
+/path/to/file.txt
+__ggml_vocab_test__
+end.
+/usr/bin and ://
+/ and ?/
+
+__ggml_vocab_test__
+<html><body>Hi</body></html>
+__ggml_vocab_test__
+def f(x):
+    return x**2  # square
+	done
+__ggml_vocab_test__
+   leading spaces and trailing   
+__ggml_vocab_test__
+
+
+
+
+__ggml_vocab_test__
+it's don't I'M we'll THEY'RE
+__ggml_vocab_test__
+Zażółć gęślą jaźń. ŻÓŁW Łódź ćma ĆMA źdźbło
+__ggml_vocab_test__
+Ąę ŚWIĘTY Mikołaj przyniósł prezenty dzieciom 6 grudnia.
+__ggml_vocab_test__
+żółwŻółw ĆmaŻuk
+__ggml_vocab_test__
+Привет, мир! ПРИВЕТ Москва
+__ggml_vocab_test__
+Γειά σου Κόσμε ΑΘΗΝΑ
+__ggml_vocab_test__
+日本語のテキスト、中国語の文章。한국어 텍스트
+__ggml_vocab_test__
+中A 中文ABC ABC中文
+__ggml_vocab_test__
+مرحبا بالعالم שלום עולם
+__ggml_vocab_test__
+हिन्दी पाठ और தமிழ் உரை
+__ggml_vocab_test__
+é café ÉCOLE ́x
+__ggml_vocab_test__
+emoji 🤖👩‍💻🇵🇱 ❤️ ✓ — … “quotes” «guillemets»
+__ggml_vocab_test__
+math: ∑ x² ≤ ∞, α+β=γ ½ ⅓ ²³
+__ggml_vocab_test__
+Ǆungla ǅungla ǆungla ʰello ﬁle
+__ggml_vocab_test__
+[INST] What is 2+2? [/INST]
+__ggml_vocab_test__
+		Tabs	and  double  spaces nbsp
+__ggml_vocab_test__
+!!! ??? ... ---
+__ggml_vocab_test__
+A
+B
+C/D//E
+__ggml_vocab_test__
+I'm sure they'LL say it's fine, we've DONE what you'd want
+__ggml_vocab_test__
+'s alone, and
+'s after a newline; O'Neil's dog's bone
+__ggml_vocab_test__
+12345678 3.14159 1,000,000 x2024y
+__ggml_vocab_test__
+don'T WON'T can't	it's
+ok
+__ggml_vocab_test__
+żółw'S ĆMA'll naïve café's
+__ggml_vocab_test__

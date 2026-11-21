@@ -15,6 +15,13 @@
 //! `add_special_tokens=True`. A GGUF holding only the header of
 //! `bartowski/Mistral-Nemo-Instruct-2407-GGUF`, with its tensor count set
 //! to zero, is enough to run them.
+//!
+//! `inkling2.inp` holds the same texts and a few with contractions and long
+//! numbers for Inkling 2. Its ids are what `tokenizers` 0.23.3 gives with
+//! the `tokenizer.json` of thinkingmachines/Inkling-2-Mini and
+//! `add_special_tokens=True`, which adds none. The header of
+//! `ggml-org/Inkling-2-Mini-GGUF` is enough to run them, in a copy of the
+//! file whose tensor data is a sparse hole of the same length.
 
 use std::path::PathBuf;
 

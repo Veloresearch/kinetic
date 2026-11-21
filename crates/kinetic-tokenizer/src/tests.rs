@@ -194,6 +194,29 @@ fn tekken_splits_where_the_case_changes() {
     );
 }
 
+// Splits from the `tokenizers` package with Inkling 2's own pattern.
+#[test]
+fn gpt4o_keeps_contractions_and_three_digits() {
+    let p = pretokenize::GPT4O;
+    assert_eq!(
+        pieces(p, "I'm sure they'LL say it's"),
+        ["I'm", " sure", " they'LL", " say", " it's"]
+    );
+    assert_eq!(
+        pieces(p, "'s and\n's O'Neil's"),
+        ["'s", " and", "\n", "'s", " O", "'Neil's"]
+    );
+    assert_eq!(
+        pieces(p, "12345678 x2024y"),
+        ["123", "456", "78", " x", "202", "4", "y"]
+    );
+    assert_eq!(
+        pieces(p, "getURLForID iPhone ABCdef"),
+        ["get", "URLFor", "ID", " i", "Phone", " ABCdef"]
+    );
+    assert_eq!(pieces(p, "żółw'S ĆMA'll"), ["żółw'S", " ĆMA'll"]);
+}
+
 #[test]
 fn pieces_cover_the_text() {
     let text = "Zażółć gęślą jaźń 👩‍💻 日本語 مرحبا\u{378}\u{1f}  \r\n 12 ';";
@@ -205,6 +228,7 @@ fn pieces_cover_the_text() {
         pretokenize::SMOLLM,
         pretokenize::HUNYUAN,
         pretokenize::TEKKEN,
+        pretokenize::GPT4O,
     ] {
         assert_eq!(pieces(p, text).concat(), text);
     }
@@ -594,6 +618,7 @@ fn random_text_never_panics_and_byte_level_round_trips() {
             .token("<s>", 3)
             .kv("tokenizer.ggml.bos_token_id", Value::U32(256))
             .build(),
+        Builder::new("inkling2").build(),
         sentencepiece(&[("▁a", 1, -1.0), ("<0x41>", 6, 0.0)], Vec::new()),
         wordpiece(WORDS, Vec::new()),
     ];
