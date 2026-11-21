@@ -5,7 +5,7 @@ mod kernels;
 
 use std::cell::RefCell;
 
-use kinetic_cpu::{matmul, pool, sigmoid, softmax, Q8K};
+use kinetic_cpu::{matmul, pool, rms_norm, sigmoid, softmax, Q8K};
 use kinetic_quant::{Matrix, TensorType};
 use rayon::prelude::*;
 
@@ -75,9 +75,11 @@ pub struct Moe<'a> {
     pub glu: Glu,
     /// Multiplies the routed weights after they are normalized.
     pub weight_scale: f32,
-    /// Per-expert multipliers of the gate, up and down products, as files
-    /// with NVFP4 experts carry them.
+    /// Per-expert multipliers of the gate, up and down products.
     pub scales: [Option<Vec<f32>>; 3],
+    /// Set when the experts and their router read the layer input through
+    /// norms of their own.
+    pub norms: Option<ExpertNorms>,
 }
 
 /// How an expert combines its gate and up projections.
@@ -89,6 +91,8 @@ pub enum Glu {
     /// `beta tanh(gate / beta) sigmoid(gate) * linear tanh(up / linear)`,
     /// with `up` left as is when `linear` is zero (Inkling 2).
     Situ { beta: f32, linear: f32 },
+    /// `gelu(gate) * up` (Gemma 4).
+    Gelu,
 }
 
 impl Glu {
@@ -103,8 +107,22 @@ impl Glu {
                 };
                 beta * (gate / beta).tanh() * sigmoid(gate) * up
             }
+            Glu::Gelu => super::gelu(gate) * up,
         }
     }
+}
+
+/// The norms of a layer whose routed and shared experts each normalize
+/// their own input and output, and whose router reads the layer input
+/// through a norm of its own (Gemma 4).
+#[derive(Clone)]
+pub struct ExpertNorms {
+    pub input: Vec<f32>,
+    /// Folds in the router's input scale.
+    pub router: Vec<f32>,
+    pub output: Vec<f32>,
+    /// On the shared expert's output.
+    pub shared: Vec<f32>,
 }
 
 /// How router logits become expert probabilities.
@@ -170,12 +188,53 @@ impl Moe<'_> {
             .collect()
     }
 
+    /// Whether the block uses only what the GPU backends run: SiLU experts
+    /// on the shared feed-forward input, with no scales or norms of their
+    /// own.
+    #[cfg(feature = "cuda")]
+    pub fn plain(&self) -> bool {
+        self.glu == Glu::Silu
+            && self.weight_scale == 1.0
+            && self.scales.iter().all(Option::is_none)
+            && self.norms.is_none()
+    }
+
+    /// [`Moe::forward`] in a layer whose input is `x` and whose normalized
+    /// feed-forward input is `h`; with [`Moe::norms`] the experts and the
+    /// router read `x` through their own norms, and each branch's output is
+    /// normalized before the two are summed into `shared`.
+    pub fn forward_layer(&self, x: &[f32], h: &[f32], shared: &mut [f32], eps: f32) {
+        let Some(n) = &self.norms else {
+            return self.forward(h, shared);
+        };
+        let d = self.router.cols;
+        let norm = |y: &mut [f32], w: &[f32]| {
+            pool::for_each_chunk(y, d, |_, r| rms_norm(r, w, eps));
+        };
+        let normed = |w: &[f32]| {
+            let mut y = x.to_vec();
+            norm(&mut y, w);
+            y
+        };
+        let mut routed = vec![0.0; x.len()];
+        let picks = self.route(&normed(&n.router));
+        self.add_routed(&normed(&n.input), &picks, &mut routed);
+        norm(&mut routed, &n.output);
+        norm(shared, &n.shared);
+        shared.iter_mut().zip(&routed).for_each(|(s, r)| *s += r);
+    }
+
     /// Adds the routed experts' output for `h` to `shared`, the shared
     /// expert's output for the same rows, after scaling it by its gate.
     pub fn forward(&self, h: &[f32], shared: &mut [f32]) {
-        let d = self.router.cols;
         self.scale_shared(h, shared);
-        let picks = self.route(h);
+        self.add_routed(h, &self.route(h), shared);
+    }
+
+    /// Adds to `out` the output of the experts `picks` choose for each row
+    /// of `h`, by their weights.
+    pub fn add_routed(&self, h: &[f32], picks: &[Pick], out: &mut [f32]) {
+        let d = self.router.cols;
         let k = self.n_used;
         let jobs: Vec<Job> = picks
             .iter()
@@ -186,7 +245,7 @@ impl Moe<'_> {
             })
             .collect();
         let routed = self.run_experts(h, &jobs);
-        for (t, out) in shared.chunks_exact_mut(d).enumerate() {
+        for (t, out) in out.chunks_exact_mut(d).enumerate() {
             for (slot, pick) in picks[t * k..][..k].iter().enumerate() {
                 let y = &routed[(t * k + slot) * d..][..d];
                 out.iter_mut()
@@ -488,38 +547,25 @@ mod tests {
             bytes(&scaled(&down, &scales[2])),
         ];
         let sets = [plain, folded];
+        let experts = |data| Experts {
+            ty: TensorType::F32,
+            data,
+            rows: 2,
+            cols: 2,
+            stride: 16,
+        };
         let moe = |k: usize, scales: [Option<Vec<f32>>; 3]| Moe {
             router: Matrix::new(TensorType::F32, &router, 3, 2),
-            gate: Experts {
-                ty: TensorType::F32,
-                data: &sets[k][0],
-                rows: 2,
-                cols: 2,
-                stride: 16,
-            },
-            up: Experts {
-                ty: TensorType::F32,
-                data: &sets[k][1],
-                rows: 2,
-                cols: 2,
-                stride: 16,
-            },
-            down: Experts {
-                ty: TensorType::F32,
-                data: &sets[k][2],
-                rows: 2,
-                cols: 2,
-                stride: 16,
-            },
+            gate: experts(&sets[k][0]),
+            up: experts(&sets[k][1]),
+            down: experts(&sets[k][2]),
             n_used: 2,
             shared_gate: None,
             gating: Gating::Softmax,
-            glu: Glu::Situ {
-                beta: 4.0,
-                linear: 25.0,
-            },
+            glu: Glu::Gelu,
             weight_scale: 1.0,
             scales,
+            norms: None,
         };
         let h = [0.7, -1.2, 0.3, 0.9];
         let (mut got, mut want) = ([0.0; 4], [0.0; 4]);

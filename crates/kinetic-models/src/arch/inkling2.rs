@@ -425,6 +425,7 @@ impl Params {
                 let down = l.optional_vector(&t("ffn_down_exps.scale"), self.n_experts)?;
                 [gate_up.clone(), gate_up, down]
             },
+            norms: None,
         };
         Ok(Layer {
             mixer_norm: None,

@@ -5,10 +5,15 @@
 //! Image rows go in through [`crate::Input::Image`]: causal like text, at
 //! consecutive positions, with the padding token's per-layer input.
 //! The larger sizes have no per-layer inputs, and their full-attention
-//! layers fewer key-value heads and no values of their own.
+//! layers fewer key-value heads and no values of their own. In the
+//! mixture-of-experts size the feed-forward is the shared expert beside the
+//! routed experts, each with norms of its own.
 
 use super::{Basics, Family, Stack};
-use crate::blocks::{Activation, Attention, Gate, Mixer, Rope, RopeLayout, SharedKv, SwiGlu};
+use crate::blocks::{
+    Activation, Attention, ExpertNorms, Gate, Gating, Glu, Mixer, Moe, Rope, RopeLayout, SharedKv,
+    SwiGlu,
+};
 use crate::loader::Loader;
 use crate::model::Layer;
 use crate::per_layer::{LayerInput, PerLayer};
@@ -22,11 +27,6 @@ pub(crate) const FAMILY: Family = Family {
 fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
     let (d, eps) = (b.d, b.eps);
     let n_layer = l.usize("block_count")?;
-    if l.usize_or("expert_count", 0)? > 0 {
-        return Err(LoadError(
-            "Gemma 4 with mixture-of-experts layers is not supported yet".into(),
-        ));
-    }
     let n_head = l.usize("attention.head_count")?;
     let n_head_kv = l.usizes("attention.head_count_kv", n_layer)?;
     if n_head_kv
@@ -52,6 +52,11 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
         .collect();
     let head_full = l.usize("attention.key_length")?;
     let head_swa = l.usize("attention.key_length_swa")?;
+    if l.usize_or("attention.value_length", head_full)? != head_full
+        || l.usize_or("attention.value_length_swa", head_swa)? != head_swa
+    {
+        return Err(LoadError("value heads must be as long as key heads".into()));
+    }
     let factors = l.optional_vector("rope_freqs.weight", head_full / 2)?;
     let width = l.usize("embedding_length_per_layer_input")?;
 
@@ -125,7 +130,10 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
                 activation: Activation::Gelu,
                 ..l.swiglu(i, d, n_ff[i])?
             }),
-            experts: None,
+            experts: match l.header().tensor(&t("ffn_gate_inp.weight")) {
+                Some(_) => Some(experts(l, i, d)?),
+                None => None,
+            },
             ffn_out_norm: Some(l.vector(&t("post_ffw_norm.weight"), d)?),
             residual_scale: None,
             output_scale: (width == 0).then_some(scale),
@@ -138,6 +146,9 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
                 scale,
             });
         }
+    }
+    if layers.iter().any(|l| l.experts.is_some()) {
+        l.check_all_read(SKIPPED)?;
     }
     if width == 0 {
         return Ok(layers.into());
@@ -159,6 +170,49 @@ fn build<'a>(l: &Loader<'a>, b: &Basics) -> Result<Stack<'a>, LoadError> {
         mtp: None,
         per_layer: Some(per_layer),
         network: None,
+    })
+}
+
+/// What the shared loader reads after the layers.
+const SKIPPED: &[&str] = &[
+    "context_length",
+    "final_logit_softcapping",
+    "token_embd.weight",
+    "output.weight",
+    "output_norm.weight",
+];
+
+/// The routed experts of layer `i`, whose feed-forward is their shared
+/// expert.
+fn experts<'a>(l: &Loader<'a>, i: usize, d: usize) -> Result<Moe<'a>, LoadError> {
+    let t = |s: &str| format!("blk.{i}.{s}");
+    let n_ff = l.usize("expert_feed_forward_length")?;
+    let n_experts = l.usize("expert_count")?;
+    let (gate, up) = super::moe::gate_up(l, i, d, n_ff, n_experts)?;
+    // the router reads the normalized input over sqrt(d), times its scale
+    let mut router = l.vector(&t("ffn_gate_inp.scale"), d)?;
+    router.iter_mut().for_each(|w| *w /= (d as f32).sqrt());
+    Ok(Moe {
+        router: l.matrix(&t("ffn_gate_inp.weight"), d, n_experts)?,
+        gate,
+        up,
+        down: l.experts(&t("ffn_down_exps.weight"), n_ff, d, n_experts)?,
+        n_used: l.usize("expert_used_count")?,
+        shared_gate: None,
+        gating: Gating::Softmax,
+        glu: Glu::Gelu,
+        weight_scale: 1.0,
+        scales: [
+            None,
+            None,
+            l.optional_vector(&t("ffn_down_exps.scale"), n_experts)?,
+        ],
+        norms: Some(ExpertNorms {
+            input: l.vector(&t("pre_ffw_norm_2.weight"), d)?,
+            router,
+            output: l.vector(&t("post_ffw_norm_2.weight"), d)?,
+            shared: l.vector(&t("post_ffw_norm_1.weight"), d)?,
+        }),
     })
 }
 
@@ -188,8 +242,8 @@ mod tests {
 
     /// Two layers laid out as in the 12B and 31B files: a sliding-window
     /// layer, then a full-attention one with fewer key-value heads and no
-    /// values, and no per-layer inputs.
-    fn dense(extra: &[(&str, Value)]) -> Synthetic {
+    /// values, and no per-layer inputs; each layer also gets the `tensors`.
+    fn file(extra: &[(&str, Value)], tensors: &[(&str, &[u64])]) -> Synthetic {
         let key = |k: &str, v| (format!("gemma4.{k}"), v);
         let mut metadata = vec![
             (
@@ -241,6 +295,7 @@ mod tests {
             if values {
                 shapes.push((t("attn_v.weight"), vec![D, kv * hd]));
             }
+            shapes.extend(tensors.iter().map(|(n, dims)| (t(n), dims.to_vec())));
         }
         let mut data = Vec::new();
         let tensors = shapes
@@ -274,7 +329,7 @@ mod tests {
 
     #[test]
     fn dense_sizes_load_and_run() {
-        let file = dense(&[]);
+        let file = file(&[], &[]);
         let model = crate::load(&file).unwrap_or_else(|e| panic!("{}", e.0));
         assert!(model.per_layer.is_none());
         let Mixer::Attention(full) = &model.layers[1].mixer else {
@@ -287,10 +342,57 @@ mod tests {
         assert!(logits.iter().all(|v| v.is_finite()));
     }
 
+    /// The 26B A4B layout: four experts of width four, two per token,
+    /// gate and up stored together.
+    const EXPERTS: &[(&str, &[u64])] = &[
+        ("ffn_gate_inp.weight", &[D, 4]),
+        ("ffn_gate_inp.scale", &[D]),
+        ("ffn_gate_up_exps.weight", &[D, 8, 4]),
+        ("ffn_down_exps.weight", &[4, D, 4]),
+        ("ffn_down_exps.scale", &[4]),
+        ("pre_ffw_norm_2.weight", &[D]),
+        ("post_ffw_norm_1.weight", &[D]),
+        ("post_ffw_norm_2.weight", &[D]),
+    ];
+
+    fn experts(tensors: &[(&str, &[u64])]) -> Synthetic {
+        file(
+            &[
+                ("expert_count", Value::U32(4)),
+                ("expert_used_count", Value::U32(2)),
+                ("expert_feed_forward_length", Value::U32(4)),
+            ],
+            tensors,
+        )
+    }
+
+    // Expected values from a NumPy (float64) rendering of llama.cpp's
+    // Gemma 4 feed-forward on the same weights, for the second layer, as
+    // the first one's output scale is zero.
     #[test]
-    fn mixture_of_experts_is_turned_down_by_name() {
-        let file = dense(&[("expert_count", Value::U32(128))]);
-        let err = crate::load(&file).err().expect("an error");
-        assert!(err.0.contains("mixture-of-experts"), "{}", err.0);
+    fn experts_match_the_reference() {
+        let file = experts(EXPERTS);
+        let model = crate::load(&file).unwrap_or_else(|e| panic!("{}", e.0));
+        let mut x: Vec<f32> = (0..2 * D)
+            .map(|i| ((i * 5) % 11) as f32 * 0.3 - 1.4)
+            .collect();
+        model.layers[1].forward_with(&mut x, 1e-6, |h| vec![0.0; h.len()]);
+        let want = [
+            -0.84, 0.218986, 0.971891, -0.0978544, 1.07974, -0.403377, 0.762813, -0.584191, 0.42,
+            -0.816299, 0.291497, -0.669238, -0.160717, 1.23901, 0.00574467, 0.762909,
+        ];
+        for (g, w) in x.iter().zip(want) {
+            assert!((g - w).abs() < 1e-4, "{x:?} against {want:?}");
+        }
+        let logits = model.run(&mut model.new_state(), &[1, 5, 3], false).logits;
+        assert!(logits.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn experts_in_a_layout_not_read_are_refused() {
+        let mut tensors = EXPERTS.to_vec();
+        tensors.push(("ffn_gate_exps.weight", &[D, 4, 4]));
+        let err = crate::load(&experts(&tensors)).err().expect("an error");
+        assert!(err.0.contains("blk.0.ffn_gate_exps.weight"), "{}", err.0);
     }
 }

@@ -2,7 +2,7 @@
 //! experts, of which a few run per token, and in some models a shared expert
 //! that runs on every token, in Qwen3.5 MoE behind a sigmoid gate.
 
-use crate::blocks::{Activation, Gating, Glu, Moe, SwiGlu};
+use crate::blocks::{Activation, Experts, Gating, Glu, Moe, SwiGlu};
 use crate::loader::Loader;
 use crate::LoadError;
 
@@ -29,10 +29,11 @@ pub(crate) fn routed<'a>(
             )))
         }
     };
+    let (gate, up) = gate_up(l, i, d, n_ff, n_experts)?;
     Ok(Moe {
         router: l.matrix(&t("ffn_gate_inp.weight"), d, n_experts)?,
-        gate: l.experts(&t("ffn_gate_exps.weight"), d, n_ff, n_experts)?,
-        up: l.experts(&t("ffn_up_exps.weight"), d, n_ff, n_experts)?,
+        gate,
+        up,
         down: l.experts(&t("ffn_down_exps.weight"), n_ff, d, n_experts)?,
         n_used: l.usize("expert_used_count")?,
         shared_gate: l.optional_vector(&t("ffn_gate_inp_shexp.weight"), d)?,
@@ -40,7 +41,28 @@ pub(crate) fn routed<'a>(
         glu: Glu::Silu,
         weight_scale: 1.0,
         scales: Default::default(),
+        norms: None,
     })
+}
+
+/// The gate and up projections of the routed experts of layer `i`, stored
+/// apart or together in one tensor, gate rows first.
+pub(crate) fn gate_up<'a>(
+    l: &Loader<'a>,
+    i: usize,
+    d: usize,
+    n_ff: usize,
+    n_experts: usize,
+) -> Result<(Experts<'a>, Experts<'a>), LoadError> {
+    let fused = format!("blk.{i}.ffn_gate_up_exps.weight");
+    if l.header().tensor(&fused).is_some() {
+        return Ok(l.experts(&fused, d, 2 * n_ff, n_experts)?.halves());
+    }
+    let t = |s: &str| format!("blk.{i}.{s}");
+    Ok((
+        l.experts(&t("ffn_gate_exps.weight"), d, n_ff, n_experts)?,
+        l.experts(&t("ffn_up_exps.weight"), d, n_ff, n_experts)?,
+    ))
 }
 
 /// The shared expert of layer `i`, if the file has one; it is as wide as a

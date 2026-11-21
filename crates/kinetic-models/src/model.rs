@@ -90,7 +90,7 @@ impl Layer<'_> {
             None => vec![0.0; h.len()],
         };
         if let Some(moe) = &self.experts {
-            moe.forward(&h, &mut ffn);
+            moe.forward_layer(x, &h, &mut ffn, eps);
         }
         norm(&mut ffn, &self.ffn_out_norm);
         add(x, &ffn);
