@@ -34,7 +34,7 @@ use kinetic_cuda::{
 use kinetic_quant::{Matrix, TensorType};
 
 use super::{cuda_error, Gpu};
-use crate::blocks::{Gating, Moe, Pick};
+use crate::blocks::{Gating, Glu, Moe, Pick};
 use crate::LoadError;
 
 pub(super) use offload::Offload;
@@ -66,6 +66,12 @@ impl CudaExperts {
         shared: bool,
     ) -> Result<CudaExperts, LoadError> {
         check_types(moe)?;
+        if moe.scales.iter().any(Option::is_some) || moe.glu != Glu::Silu || moe.weight_scale != 1.0
+        {
+            return Err(LoadError(
+                "expert scales and activations other than SiLU do not run on CUDA yet".into(),
+            ));
+        }
         let routers = [Some(&moe.router), next];
         if routers.iter().flatten().any(|r| r.ty != TensorType::F32) {
             return Err(LoadError("expert routers must be f32 on CUDA".into()));

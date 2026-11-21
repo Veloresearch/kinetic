@@ -75,6 +75,9 @@ pub struct Moe<'a> {
     pub glu: Glu,
     /// Multiplies the routed weights after they are normalized.
     pub weight_scale: f32,
+    /// Per-expert multipliers of the gate, up and down products, as files
+    /// with NVFP4 experts carry them.
+    pub scales: [Option<Vec<f32>>; 3],
 }
 
 /// How an expert combines its gate and up projections.
@@ -236,7 +239,9 @@ impl Moe<'_> {
             xq: &xq,
             jobs: Some(jobs),
         };
-        let [mut act, up] = products([&self.gate, &self.up], &groups, &input, jobs.len());
+        let [mut act, mut up] = products([&self.gate, &self.up], &groups, &input, jobs.len());
+        self.scale(0, &mut act, jobs);
+        self.scale(1, &mut up, jobs);
         pool::for_each_chunk(&mut act, ACTIVATION_CHUNK, |i, g| {
             g.iter_mut()
                 .zip(&up[i * ACTIVATION_CHUNK..])
@@ -254,8 +259,22 @@ impl Moe<'_> {
             xq: &actq,
             jobs: None,
         };
-        let [out] = products([&self.down], &groups, &input, jobs.len());
+        let [mut out] = products([&self.down], &groups, &input, jobs.len());
+        self.scale(2, &mut out, jobs);
         out
+    }
+
+    /// Multiplies each job's row of `y` by its expert's scale of product
+    /// `i` (gate, up, down), if the file has those scales.
+    fn scale(&self, i: usize, y: &mut [f32], jobs: &[Job]) {
+        let Some(scales) = &self.scales[i] else {
+            return;
+        };
+        let width = y.len() / jobs.len();
+        for (row, job) in y.chunks_exact_mut(width).zip(jobs) {
+            let s = scales[job.expert as usize];
+            row.iter_mut().for_each(|v| *v *= s);
+        }
     }
 }
 
@@ -442,6 +461,72 @@ mod tests {
             .zip(want)
         {
             assert!((glu.apply(g, u) - w).abs() < 1e-5);
+        }
+    }
+
+    /// Per-expert scales give what weights multiplied by them give, as
+    /// llama.cpp's `build_lora_mm_id` scales each expert's product.
+    #[test]
+    fn expert_scales_multiply_each_product() {
+        let bytes = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+        let pattern = |n: usize, k: usize| -> Vec<f32> {
+            (0..n).map(|i| ((i * k) % 7) as f32 * 0.3 - 0.9).collect()
+        };
+        let (gate, up, down) = (pattern(12, 3), pattern(12, 5), pattern(12, 2));
+        let scales = [[0.5, 2.0, -1.5], [3.0, 0.25, 1.0], [-2.0, 0.5, 4.0]];
+        let scaled = |w: &[f32], s: &[f32; 3]| -> Vec<f32> {
+            w.chunks(4)
+                .zip(s)
+                .flat_map(|(e, s)| e.iter().map(move |w| w * s))
+                .collect()
+        };
+        let router = bytes(&pattern(6, 4));
+        let plain = [bytes(&gate), bytes(&up), bytes(&down)];
+        let folded = [
+            bytes(&scaled(&gate, &scales[0])),
+            bytes(&scaled(&up, &scales[1])),
+            bytes(&scaled(&down, &scales[2])),
+        ];
+        let sets = [plain, folded];
+        let moe = |k: usize, scales: [Option<Vec<f32>>; 3]| Moe {
+            router: Matrix::new(TensorType::F32, &router, 3, 2),
+            gate: Experts {
+                ty: TensorType::F32,
+                data: &sets[k][0],
+                rows: 2,
+                cols: 2,
+                stride: 16,
+            },
+            up: Experts {
+                ty: TensorType::F32,
+                data: &sets[k][1],
+                rows: 2,
+                cols: 2,
+                stride: 16,
+            },
+            down: Experts {
+                ty: TensorType::F32,
+                data: &sets[k][2],
+                rows: 2,
+                cols: 2,
+                stride: 16,
+            },
+            n_used: 2,
+            shared_gate: None,
+            gating: Gating::Softmax,
+            glu: Glu::Situ {
+                beta: 4.0,
+                linear: 25.0,
+            },
+            weight_scale: 1.0,
+            scales,
+        };
+        let h = [0.7, -1.2, 0.3, 0.9];
+        let (mut got, mut want) = ([0.0; 4], [0.0; 4]);
+        moe(0, scales.map(|s| Some(s.to_vec()))).forward(&h, &mut got);
+        moe(1, Default::default()).forward(&h, &mut want);
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-6, "{got:?} against {want:?}");
         }
     }
 

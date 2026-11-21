@@ -84,6 +84,7 @@ fn device_experts_equal_host_experts_bit_for_bit() {
             gating: Gating::Softmax,
             glu: Glu::Silu,
             weight_scale: 1.0,
+            scales: Default::default(),
         };
         let h: Vec<f32> = random_bytes(tokens * d, &mut seed)
             .iter()

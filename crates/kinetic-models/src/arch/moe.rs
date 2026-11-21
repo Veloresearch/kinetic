@@ -39,6 +39,7 @@ pub(crate) fn routed<'a>(
         gating,
         glu: Glu::Silu,
         weight_scale: 1.0,
+        scales: Default::default(),
     })
 }
 

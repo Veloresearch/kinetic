@@ -87,15 +87,17 @@ impl<'a> Loader<'a> {
     }
 
     /// Fails on the per-tensor scales llama.cpp multiplies a product, its
-    /// input or the cache by, such as the second scale of NVFP4 weights:
-    /// nothing here applies them, and the output would be wrong without.
+    /// input or the cache by, such as the second scale of NVFP4 weights,
+    /// unless a family read them to apply them: the output would be wrong
+    /// without.
     pub fn refuse_weight_scales(&self) -> Result<(), LoadError> {
         const SCALES: &[&str] = &[".scale", ".input_scale", ".k_scale", ".v_scale"];
+        let read = self.read.borrow();
         match self
             .header()
             .tensors
             .iter()
-            .find(|t| SCALES.iter().any(|s| t.name.ends_with(s)))
+            .find(|t| SCALES.iter().any(|s| t.name.ends_with(s)) && !read.contains(&t.name))
         {
             Some(t) => Err(LoadError(format!(
                 "tensor {} scales a weight, which is not supported yet",

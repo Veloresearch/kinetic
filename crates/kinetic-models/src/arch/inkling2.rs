@@ -360,6 +360,11 @@ impl Params {
             },
             glu: self.glu,
             weight_scale: self.weight_scale,
+            scales: {
+                let gate_up = l.optional_vector(&t("ffn_gate_up_exps.scale"), self.n_experts)?;
+                let down = l.optional_vector(&t("ffn_down_exps.scale"), self.n_experts)?;
+                [gate_up.clone(), gate_up, down]
+            },
         };
         Ok(Layer {
             mixer_norm: None,
