@@ -137,6 +137,15 @@ impl<'a> Loader<'a> {
             .collect()
     }
 
+    /// A per-layer integer hyperparameter, stored either as an array of
+    /// `len` values or as one value for every layer.
+    pub fn usizes(&self, key: &str, len: usize) -> Result<Vec<usize>, LoadError> {
+        match self.hparam(key)?.as_array() {
+            Some(_) => self.array(key, len, |v| v.as_u64().map(|n| n as usize)),
+            None => Ok(vec![self.usize(key)?; len]),
+        }
+    }
+
     /// The gated feed-forward of layer `i`, under the usual tensor names.
     pub fn swiglu(&self, i: usize, d: usize, n_ff: usize) -> Result<SwiGlu<'a>, LoadError> {
         Ok(SwiGlu {

@@ -32,12 +32,7 @@ pub(crate) fn layers<'a>(l: &Loader<'a>, d: usize, eps: f32) -> Result<Vec<Layer
     }
     let n_layer = l.usize("block_count")?;
     let n_head = l.usize("attention.head_count")?;
-    let n_head_kv = match l.hparam("attention.head_count_kv")?.as_array() {
-        Some(_) => l.array("attention.head_count_kv", n_layer, |v| {
-            v.as_u64().map(|n| n as usize)
-        })?,
-        None => vec![l.usize("attention.head_count_kv")?; n_layer],
-    };
+    let n_head_kv = l.usizes("attention.head_count_kv", n_layer)?;
     let head_dim = l.usize_or("attention.key_length", d / n_head)?;
     let rotary = header
         .arch_key("rope.scaling.finetuned")
