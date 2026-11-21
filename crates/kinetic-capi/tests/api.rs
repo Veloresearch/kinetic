@@ -50,6 +50,7 @@ fn null_and_missing_inputs_fail_with_a_reason() {
         );
         assert_eq!(none, -1);
         assert_eq!(kinetic_embedding_size(ptr::null()), 0);
+        assert_eq!(kinetic_vocab_size(ptr::null()), 0);
         kinetic_model_free(ptr::null_mut());
         kinetic_session_free(ptr::null_mut());
     }
@@ -86,6 +87,31 @@ fn a_session_remembers_its_turns() {
             kinetic_session_generate(session, follow_up.as_ptr(), &params, None, ptr::null_mut());
         assert!(n > 0, "{}", last_error());
         kinetic_session_free(session);
+    }
+}
+
+#[test]
+#[ignore = "needs KINETIC_TEST_GGUF"]
+fn logits_fill_the_vocabulary() {
+    unsafe {
+        let model = kinetic_model_load(env_path("KINETIC_TEST_GGUF").as_ptr());
+        assert!(!model.is_null(), "{}", last_error());
+        let n = kinetic_vocab_size(model);
+        assert!(n > 0);
+        let prompt = CString::new("Once upon a time").unwrap();
+        let mut out = vec![f32::NAN; n];
+        assert_eq!(
+            kinetic_logits(model, prompt.as_ptr(), out.as_mut_ptr()),
+            0,
+            "{}",
+            last_error()
+        );
+        assert!(out.iter().all(|x| x.is_finite()));
+        assert_eq!(kinetic_logits(model, prompt.as_ptr(), ptr::null_mut()), -1);
+        assert_eq!(last_error(), "out is NULL");
+        assert_eq!(kinetic_logits(model, ptr::null(), out.as_mut_ptr()), -1);
+        assert_eq!(last_error(), "text is NULL");
+        kinetic_model_free(model);
     }
 }
 

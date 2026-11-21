@@ -223,4 +223,12 @@ impl Backend for VulkanBackend<'_> {
             self.cpu.generate(prompt, job, emit)
         }
     }
+
+    fn logits(&mut self, tokens: &[u32], all_rows: bool) -> Result<Vec<f32>, String> {
+        let mut state = self.gpu.new_state().map_err(|e| format!("Vulkan: {e}"))?;
+        self.gpu
+            .run(&mut state, tokens, all_rows)
+            .map(|f| f.logits)
+            .map_err(|e| format!("Vulkan: {e}"))
+    }
 }

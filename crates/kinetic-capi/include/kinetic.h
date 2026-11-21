@@ -85,6 +85,17 @@ size_t kinetic_embedding_size(const kinetic_model *model);
  */
 int kinetic_embed(const kinetic_model *model, const char *text, float *out);
 
+/* The number of values kinetic_logits writes: the model's vocabulary size.
+ * 0 for an embedding model. */
+size_t kinetic_vocab_size(const kinetic_model *model);
+
+/*
+ * Writes the model's raw logits for the token after text, one per
+ * vocabulary entry, the scores before any sampler, to out. The argmax is
+ * what greedy decoding picks. Returns 0, or -1 on failure.
+ */
+int kinetic_logits(const kinetic_model *model, const char *text, float *out);
+
 #ifdef __cplusplus
 }
 #endif

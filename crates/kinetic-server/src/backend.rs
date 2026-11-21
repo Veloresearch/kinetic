@@ -79,6 +79,13 @@ pub trait Backend: Send {
         0
     }
 
+    /// The model's raw logits after `tokens`, from this backend's device,
+    /// as a sampling request reads them: the row after the last token, or
+    /// with `all_rows` one row per token, one `n_vocab`-value row apiece.
+    /// Runs `tokens` on a fresh state, which gives the same bits a
+    /// request's batches give and disturbs nothing of the warm cache.
+    fn logits(&mut self, tokens: &[u32], all_rows: bool) -> Result<Vec<f32>, String>;
+
     /// Runs the next batch of `prompt` that a request for it, or for any
     /// longer prompt starting with it, would run first, so that request
     /// starts further in and generates exactly what it would have; returns

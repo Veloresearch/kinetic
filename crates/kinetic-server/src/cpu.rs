@@ -342,6 +342,12 @@ impl Backend for CpuBackend<'_> {
         sequence::generate(self, prompt, job, emit)
     }
 
+    fn logits(&mut self, tokens: &[u32], all_rows: bool) -> Result<Vec<f32>, String> {
+        let _seat = self.model.seat();
+        let mut state = self.model.new_state();
+        Ok(self.model.run(&mut state, tokens, all_rows).logits)
+    }
+
     fn reuses(&self, prompt: &[u32]) -> usize {
         self.cached
             .as_ref()

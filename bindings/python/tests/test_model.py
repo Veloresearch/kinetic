@@ -4,7 +4,9 @@ KINETIC_TEST_GGUF=SmolLM2-135M-Instruct-f16.gguf KINETIC_TEST_EMBED_GGUF=bge-sma
 python -m unittest discover -s tests
 """
 
+import math
 import os
+import struct
 import threading
 import unittest
 
@@ -66,6 +68,53 @@ class TextModel(unittest.TestCase):
             self.model.chat([{"role": "user"}])
         with self.assertRaises(RuntimeError):
             self.model.embed(["text"])
+
+
+@unittest.skipUnless(TEXT, "set KINETIC_TEST_GGUF")
+class Logits(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = kinetic.Model(TEXT)
+
+    def test_logits_shape_and_stability(self):
+        row = self.model.logits("Once upon a time")
+        self.assertEqual(len(row), self.model.n_vocab)
+        self.assertTrue(all(map(math.isfinite, row)))
+        self.assertEqual(row, self.model.logits("Once upon a time"))
+
+    def test_logits_rows_are_flat_little_endian_bytes(self):
+        ids = self.model.tokenize("The capital of France is", special=True)
+        b = self.model.logits_rows(ids)
+        n = self.model.n_vocab
+        self.assertEqual(len(b), 4 * len(ids) * n)
+        # the row after the prompt, which logits returns as floats, is the
+        # last row of the buffer
+        row = self.model.logits("The capital of France is")
+        last = struct.unpack_from("<f", b, 4 * (len(ids) - 1) * n)[0]
+        self.assertEqual(last, row[0])
+        self.assertTrue(
+            all(
+                math.isfinite(struct.unpack_from("<f", b, i)[0])
+                for i in (0, 4, 4 * n, len(b) - 4)
+            )
+        )
+
+    def test_logits_rows_reject_bad_input(self):
+        with self.assertRaises(RuntimeError):
+            self.model.logits_rows([])
+        with self.assertRaises(RuntimeError) as e:
+            self.model.logits_rows([2**31 - 1])
+        self.assertIn("past the vocabulary", str(e.exception))
+
+
+@unittest.skipUnless(EMBED, "set KINETIC_TEST_EMBED_GGUF")
+class EmbeddingLogits(unittest.TestCase):
+    def test_no_logits_on_an_embedding_model(self):
+        model = kinetic.Model(EMBED)
+        self.assertIsNone(model.n_vocab)
+        with self.assertRaises(RuntimeError) as e:
+            model.logits("a cat")
+        self.assertIn("embedding", str(e.exception))
 
 
 @unittest.skipUnless(EMBED, "set KINETIC_TEST_EMBED_GGUF")

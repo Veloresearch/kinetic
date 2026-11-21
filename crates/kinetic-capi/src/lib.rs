@@ -246,3 +246,39 @@ pub unsafe extern "C" fn kinetic_embed(
     })
     .unwrap_or(-1)
 }
+
+/// # Safety
+/// `model` is NULL or a live model.
+#[no_mangle]
+pub unsafe extern "C" fn kinetic_vocab_size(model: *const KineticModel) -> usize {
+    // SAFETY: the caller passes NULL or a live model.
+    unsafe { model.as_ref() }
+        .and_then(|m| m.0.n_vocab())
+        .unwrap_or(0)
+}
+
+/// # Safety
+/// `model` is NULL or a live model; `text` is NULL or a NUL-terminated
+/// string; `out` is NULL or has room for `kinetic_vocab_size(model)` floats.
+#[no_mangle]
+pub unsafe extern "C" fn kinetic_logits(
+    model: *const KineticModel,
+    text: *const c_char,
+    out: *mut f32,
+) -> i32 {
+    guard(|| {
+        // SAFETY: the caller passes NULL or a live model.
+        let model = unsafe { model.as_ref() }.ok_or("model is NULL")?;
+        // SAFETY: forwarded from the caller.
+        let prompt = unsafe { self::text(text, "text") }?;
+        if out.is_null() {
+            return Err("out is NULL".into());
+        }
+        let logits = model.0.logits(prompt)?;
+        // SAFETY: the caller gives room for the vocabulary, which is how
+        // long the logits are.
+        unsafe { ptr::copy_nonoverlapping(logits.as_ptr(), out, logits.len()) };
+        Ok(0)
+    })
+    .unwrap_or(-1)
+}

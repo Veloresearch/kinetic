@@ -712,6 +712,27 @@ impl Engine<'_> {
         Ok(prompt)
     }
 
+    /// The model's raw logits after `tokens`, before any sampler, from
+    /// the backend a request for them would use, so they are that device's
+    /// own scores: the row after the last token, or with `all_rows` one
+    /// row per token, `n_vocab` values apiece. `tokens` runs on a fresh
+    /// state, which gives the same bits a request's batches give and
+    /// changes nothing else of the engine.
+    pub fn logits(&self, tokens: &[u32], all_rows: bool) -> Result<Vec<f32>, RequestError> {
+        if tokens.is_empty() {
+            return Err(RequestError("the tokens are empty".into()));
+        }
+        if tokens.len() > self.context_length {
+            return Err(RequestError(format!(
+                "the tokens are {} long, over the {}-token context",
+                tokens.len(),
+                self.context_length
+            )));
+        }
+        self.on_backend(tokens, |_, backend| backend.logits(tokens, all_rows))
+            .map_err(RequestError)
+    }
+
     /// Zero Wait: runs `prompt`, the start of a request still being
     /// written, ahead on an idle backend in whole batches, so the request
     /// that follows only runs what is new. Gives way after each batch to

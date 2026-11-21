@@ -591,6 +591,15 @@ impl Backend for CudaBackend<'_> {
         sequence::generate(self, prompt, job, &mut |t| seat.away(|| emit(t)))
     }
 
+    fn logits(&mut self, tokens: &[u32], all_rows: bool) -> Result<Vec<f32>, String> {
+        let gpu = Arc::clone(&self.gpu);
+        let _seat = gpu.seat();
+        let mut state = gpu.new_state().map_err(|e| format!("CUDA: {e}"))?;
+        gpu.run(&mut state, tokens, all_rows)
+            .map(|f| f.logits)
+            .map_err(|e| format!("CUDA: {e}"))
+    }
+
     fn reuses(&self, prompt: &[u32]) -> usize {
         let tokens = self.settled_tokens();
         match prompt.len() > tokens.len() && prompt.starts_with(tokens) {
