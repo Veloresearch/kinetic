@@ -18,8 +18,10 @@ and the results on our reference machines.
   rewriting code, quoting a document, filling a template. The edit test sends
   one greedy chat request that renames a variable in a short Python file and
   asks for the whole file back, to `kinetic serve` and to `llama-server` with
-  llama.cpp's own speculative decoding on (`--spec-type ngram-mod`, or
-  `draft-mtp` for models with a prediction block). Speed is generated tokens
+  llama.cpp's own speculative decoding on: the script below passes
+  `--spec-type ngram-mod` unless told `draft-mtp` for models with a
+  prediction block, and `kinetic bench --compare` picks `draft-mtp` for
+  those and `ngram-simple` for the rest. Speed is generated tokens
   over the time from the first to the last token, measured on the client the
   same way for both. Both answers are greedy, so they should be identical;
   the script reports whether they are.
