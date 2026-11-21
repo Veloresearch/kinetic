@@ -29,7 +29,10 @@ pub fn fitting_quant(files: &[RepoFile], room: u64) -> Option<(&'static str, boo
             .iter()
             .filter(|f| {
                 let p = f.path.to_ascii_lowercase();
-                p.ends_with(".gguf") && !p.contains("mmproj") && names_quant(&f.path, q)
+                p.ends_with(".gguf")
+                    && !p.contains("mmproj")
+                    && !is_mtp(&f.path)
+                    && names_quant(&f.path, q)
             })
             .map(|f| f.size)
             .sum()
@@ -61,7 +64,11 @@ pub fn pick(
     let models: Vec<&RepoFile> = ggufs
         .iter()
         .copied()
-        .filter(|f| !is_projector(f) && shard(Path::new(&f.path)).is_none_or(|(n, _)| n == 1))
+        .filter(|f| {
+            !is_projector(f)
+                && !is_mtp(&f.path)
+                && shard(Path::new(&f.path)).is_none_or(|(n, _)| n == 1)
+        })
         .collect();
     if models.is_empty() {
         return Err("the repository has no GGUF model files".into());
@@ -137,6 +144,12 @@ fn parts(ggufs: &[&RepoFile], first: &RepoFile) -> Vec<RepoFile> {
 
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Whether the file is a model's separate prediction (MTP) block, named
+/// `mtp-<model>.gguf` as projectors are named `mmproj-<model>.gguf`.
+fn is_mtp(path: &str) -> bool {
+    file_name(path).to_ascii_lowercase().starts_with("mtp-")
 }
 
 /// Whether the file name holds `quant` as a whole word: Q4_K matches
@@ -235,6 +248,19 @@ mod tests {
         assert_eq!(fitting_quant(&files, 40), Some(("Q6_K", true)));
         assert_eq!(fitting_quant(&files, 10), Some(("Q4_K_M", false)));
         assert_eq!(fitting_quant(&sized(&[("m-Q8_0.gguf", 1)]), 100), None);
+    }
+
+    #[test]
+    fn a_prediction_block_file_is_not_a_model() {
+        let files = repo(&[
+            "Qwen3.8-35B-A3B-Distill-Q8_0.gguf",
+            "mtp-Qwen3.8-35B-A3B-Distill-Q8_0.gguf",
+            "mtp-gemma-4-26B-A4B-it.gguf",
+        ]);
+        let got = pick(&files, Some("Q8_0"), None, true).unwrap();
+        assert_eq!(paths(&got), ["Qwen3.8-35B-A3B-Distill-Q8_0.gguf"]);
+        let got = pick(&files, None, None, true).unwrap();
+        assert_eq!(paths(&got), ["Qwen3.8-35B-A3B-Distill-Q8_0.gguf"]);
     }
 
     #[test]

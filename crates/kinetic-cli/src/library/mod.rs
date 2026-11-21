@@ -98,6 +98,7 @@ fn from_groups(groups: Vec<folder::Group>, store: Store) -> Vec<Local> {
                 let h = Header::read(&f);
                 (f, h)
             })
+            .filter(|(_, h)| !h.as_ref().is_ok_and(|h| h.mtp_only))
             .partition(|(_, h)| h.as_ref().is_ok_and(Header::is_projector));
         let several = models.len() > 1;
         for (path, header) in models {

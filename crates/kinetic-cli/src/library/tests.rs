@@ -4,10 +4,15 @@ use super::*;
 
 /// A GGUF file with no tensors and the given architecture and file type.
 fn gguf(path: &Path, arch: &str, file_type: u32) {
+    gguf_with(path, arch, file_type, &[]);
+}
+
+/// [`gguf`] with more `u32` keys.
+fn gguf_with(path: &Path, arch: &str, file_type: u32, extra: &[(&str, u32)]) {
     let mut b = b"GGUF".to_vec();
     b.extend(3u32.to_le_bytes());
     b.extend(0u64.to_le_bytes());
-    b.extend(2u64.to_le_bytes());
+    b.extend((2 + extra.len() as u64).to_le_bytes());
     let key = |b: &mut Vec<u8>, k: &str| {
         b.extend((k.len() as u64).to_le_bytes());
         b.extend(k.as_bytes());
@@ -18,6 +23,11 @@ fn gguf(path: &Path, arch: &str, file_type: u32) {
     key(&mut b, "general.file_type");
     b.extend(4u32.to_le_bytes());
     b.extend(file_type.to_le_bytes());
+    for (k, v) in extra {
+        key(&mut b, k);
+        b.extend(4u32.to_le_bytes());
+        b.extend(v.to_le_bytes());
+    }
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, b).unwrap();
 }
@@ -95,6 +105,32 @@ fn names_repositories_and_their_quants() {
         "lmstudio-community/Qwen3-4B-GGUF:Q8_0"
     );
     assert_eq!(quant("model").unwrap(), "bartowski/vision");
+}
+
+#[test]
+fn prediction_block_files_are_not_models() {
+    let s = scratch("mtp");
+    let gemma = s.0.join("HauhauCS").join("Gemma4-MTP");
+    gguf(&gemma.join("Gemma4-26B-A4B-Q4_K_M.gguf"), "gemma4", 15);
+    gguf(
+        &gemma.join("mtp-gemma-4-26B-A4B-it.gguf"),
+        "gemma4-assistant",
+        32,
+    );
+    let qwen = s.0.join("IsValorum").join("Qwen3.8-MTP");
+    gguf(&qwen.join("Qwen3.8-35B-A3B-Q4_0.gguf"), "qwen35moe", 2);
+    gguf_with(
+        &qwen.join("mtp-Qwen3.8-35B-A3B-Q8_0.gguf"),
+        "qwen35moe",
+        7,
+        &[("qwen35moe.nextn_predict_layers", 1)],
+    );
+
+    let found = discover_in(&[(Store::LmStudio, s.0.clone())]);
+    assert_eq!(
+        names(&found),
+        ["HauhauCS/Gemma4-MTP", "IsValorum/Qwen3.8-MTP"]
+    );
 }
 
 #[test]

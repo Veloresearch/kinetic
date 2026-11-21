@@ -15,6 +15,8 @@ pub struct Header {
     pub size: u64,
     /// Files the model is split into.
     pub parts: u32,
+    /// Only a prediction (MTP) block that drafts for another model.
+    pub mtp_only: bool,
 }
 
 impl Header {
@@ -28,11 +30,19 @@ impl Header {
             Some((_, n)) => (shards_size(path, n), n),
             None => (file.len(), 1),
         };
+        // Gemma 4 drafts with an `-assistant` model; Qwen3.5 files hold only the last block
+        let mtp_only = arch.ends_with("-assistant")
+            || (g
+                .arch_key("nextn_predict_layers")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|n| n > 0)
+                && g.tensor("blk.0.attn_norm.weight").is_none());
         Ok(Header {
             arch,
             quant,
             size,
             parts,
+            mtp_only,
         })
     }
 
