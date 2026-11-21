@@ -29,16 +29,21 @@ pub enum Error {
 /// `Result` with this crate's [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+// a CUDA layer for another vendor's GPU fails here too, so say who CUDA is for
+const NVIDIA_ONLY: &str =
+    "the CUDA backend needs an NVIDIA GPU; AMD and Intel GPUs run through Vulkan (--device vulkan)";
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::DriverNotFound(why) => write!(f, "CUDA driver not found: {why}"),
+            Error::DriverNotFound(why) => write!(f, "CUDA driver not found: {why}; {NVIDIA_ONLY}"),
             Error::MissingSymbol(symbol) => {
                 write!(f, "CUDA driver has no {symbol}; update the driver")
             }
             Error::Cuda { call, code, name } => write!(f, "{call} failed: {name} ({code})"),
-            Error::KernelsNotBuilt => f.write_str(
-                "CUDA kernels not built: nvcc was not found when kinetic-cuda was compiled",
+            Error::KernelsNotBuilt => write!(
+                f,
+                "CUDA kernels not built: nvcc was not found when kinetic-cuda was compiled; {NVIDIA_ONLY}"
             ),
             Error::KernelsNotBuiltFor((major, minor)) => write!(
                 f,
@@ -53,3 +58,20 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_driver_or_build_says_cuda_is_for_nvidia() {
+        let missing = Error::DriverNotFound("libamdhip64.so.6: cannot open".into());
+        for e in [missing, Error::KernelsNotBuilt] {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("needs an NVIDIA GPU") && msg.contains("--device vulkan"),
+                "{msg}"
+            );
+        }
+    }
+}
