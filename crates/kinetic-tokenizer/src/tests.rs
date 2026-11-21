@@ -176,6 +176,24 @@ fn hunyuan_cuts_digits_and_han_before_words() {
     );
 }
 
+// Splits from the `tokenizers` package with Mistral Nemo's own pattern.
+#[test]
+fn tekken_splits_where_the_case_changes() {
+    let p = pretokenize::TEKKEN;
+    assert_eq!(
+        pieces(p, "getURLForID iPhone ABCdef"),
+        ["get", "URLFor", "ID", " i", "Phone", " ABCdef"]
+    );
+    assert_eq!(
+        pieces(p, "x 2024, v2!\n/a ://"),
+        ["x", " ", "2", "0", "2", "4", ",", " v", "2", "!\n/", "a", " ://"]
+    );
+    assert_eq!(
+        pieces(p, "żółwŻółw ĆMA 中A \u{301}x"),
+        ["żółw", "Żółw", " ĆMA", " 中", "A", " \u{301}x"]
+    );
+}
+
 #[test]
 fn pieces_cover_the_text() {
     let text = "Zażółć gęślą jaźń 👩‍💻 日本語 مرحبا\u{378}\u{1f}  \r\n 12 ';";
@@ -186,6 +204,7 @@ fn pieces_cover_the_text() {
         pretokenize::GPT2,
         pretokenize::SMOLLM,
         pretokenize::HUNYUAN,
+        pretokenize::TEKKEN,
     ] {
         assert_eq!(pieces(p, text).concat(), text);
     }
@@ -568,6 +587,10 @@ fn random_text_never_panics_and_byte_level_round_trips() {
     .collect();
     let others = [
         Builder::new("lfm2")
+            .token("<s>", 3)
+            .kv("tokenizer.ggml.bos_token_id", Value::U32(256))
+            .build(),
+        Builder::new("tekken")
             .token("<s>", 3)
             .kv("tokenizer.ggml.bos_token_id", Value::U32(256))
             .build(),

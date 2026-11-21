@@ -53,6 +53,24 @@ pub(crate) fn classify(c: char) -> Class {
     }
 }
 
+/// Whether `c` is in `[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]` and in
+/// `[\p{Ll}\p{Lm}\p{Lo}\p{M}]`, the upper- and lower-case parts of a word.
+pub(crate) fn letter_case(c: char) -> (bool, bool) {
+    if c.is_ascii() {
+        return (c.is_ascii_uppercase(), c.is_ascii_lowercase());
+    }
+    match get_general_category(c) {
+        G::UppercaseLetter | G::TitlecaseLetter => (true, false),
+        G::LowercaseLetter => (false, true),
+        G::ModifierLetter
+        | G::OtherLetter
+        | G::NonspacingMark
+        | G::SpacingMark
+        | G::EnclosingMark => (true, true),
+        _ => (false, false),
+    }
+}
+
 /// `[\p{P}\p{S}]`.
 pub(crate) fn is_punctuation_or_symbol(c: char) -> bool {
     if c.is_ascii() {

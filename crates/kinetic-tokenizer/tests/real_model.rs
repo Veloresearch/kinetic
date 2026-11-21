@@ -7,6 +7,14 @@
 //! whose vocabulary differs from the one upstream recorded. Set
 //! KINETIC_TEST_VECTORS to another `.inp` file, with its `.out` next to it,
 //! to check a different model or corpus.
+//!
+//! `tekken.inp` holds mixed-case, digit, punctuation, non-Latin, combining
+//! mark, emoji and Polish texts for Mistral Nemo. Its ids, BOS included, are
+//! what the Hugging Face `tokenizers` package 0.23.3 gives with the
+//! `tokenizer.json` of Mistral-Nemo-Instruct-2407 and
+//! `add_special_tokens=True`. A GGUF holding only the header of
+//! `bartowski/Mistral-Nemo-Instruct-2407-GGUF`, with its tensor count set
+//! to zero, is enough to run them.
 
 use std::path::PathBuf;
 

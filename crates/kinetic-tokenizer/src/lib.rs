@@ -6,6 +6,8 @@
 //! Produces the same token ids as llama.cpp for the supported BPE
 //! pre-tokenizers: `qwen35`, `qwen2`, `llama-bpe`, `lfm2`, `falcon-h1`,
 //! `dbrx`, `smollm`, `refact`, `exaone4`, `hunyuan-dense` and `gpt-2`.
+//! For `tekken` it follows the model's own split pattern, which llama.cpp
+//! approximates for letters outside ASCII.
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -104,6 +106,7 @@ impl Tokenizer {
                     "smollm" | "refact" => (pretokenize::SMOLLM, false, false),
                     "gpt-2" | "exaone4" => (pretokenize::GPT2, false, false),
                     "hunyuan-dense" => (pretokenize::HUNYUAN, false, false),
+                    "tekken" | "pixtral" => (pretokenize::TEKKEN, true, true),
                     _ => return Err(Error::Unsupported(format!("pre-tokenizer {pre:?}"))),
                 };
                 let model = Model::Bpe {

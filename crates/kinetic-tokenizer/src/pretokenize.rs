@@ -39,8 +39,23 @@
 //! ```
 //!
 //! keeping text that no alternative matches as pieces of its own.
+//!
+//! The Tekken pattern of Mistral Nemo splits words where the case changes:
+//!
+//! ```text
+//! [^\r\n\p{L}\p{N}]?UPPER*LOWER+
+//! |[^\r\n\p{L}\p{N}]?UPPER+LOWER*
+//! |\p{N}
+//! | ?[^\s\p{L}\p{N}]+[\r\n/]*
+//! |\s*[\r\n]+
+//! |\s+(?!\S)
+//! |\s+
+//! ```
+//!
+//! where `UPPER` is `[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]` and `LOWER` is
+//! `[\p{Ll}\p{Lm}\p{Lo}\p{M}]`.
 
-use crate::unicode::{classify, is_han_or_kana, is_punctuation_or_symbol, Class};
+use crate::unicode::{classify, is_han_or_kana, is_punctuation_or_symbol, letter_case, Class};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pattern {
@@ -55,6 +70,7 @@ pub(crate) enum Pattern {
         digits_alone: bool,
     },
     Hunyuan,
+    Tekken,
 }
 
 /// `qwen35`: marks join words, digits stand alone.
@@ -86,6 +102,9 @@ pub(crate) const SMOLLM: Pattern = Pattern::Gpt2 { digits_alone: true };
 /// `hunyuan-dense`.
 pub(crate) const HUNYUAN: Pattern = Pattern::Hunyuan;
 
+/// `tekken` and `pixtral`.
+pub(crate) const TEKKEN: Pattern = Pattern::Tekken;
+
 impl Pattern {
     pub(crate) fn split(self, text: &str) -> Pieces<'_> {
         Pieces {
@@ -103,8 +122,67 @@ impl Pattern {
             } => llama3_len(s, marks_in_words, max_digits),
             Pattern::Gpt2 { digits_alone } => gpt2_len(s, digits_alone),
             Pattern::Hunyuan => hunyuan_len(s),
+            Pattern::Tekken => tekken_len(s),
         }
     }
+}
+
+fn tekken_len(s: &str) -> usize {
+    let first = s.chars().next().expect("match_len needs text");
+    let first_len = first.len_utf8();
+    let class = classify(first);
+    let may_lead = !matches!(class, Class::Letter | Class::Number | Class::Newline);
+    for word in [upper_then_lower, upper_then_any_lower] {
+        if may_lead {
+            if let Some(len) = word(&s[first_len..]) {
+                return first_len + len;
+            }
+        }
+        if let Some(len) = word(s) {
+            return len;
+        }
+    }
+
+    if class == Class::Number {
+        return first_len;
+    }
+
+    let lead = usize::from(first == ' ');
+    let body = &s[lead..];
+    let is_symbol = |c| matches!(c, Class::Other | Class::Mark);
+    if body.chars().next().map(classify).is_some_and(is_symbol) {
+        let end = lead + span(body, is_symbol);
+        let tail = s.as_bytes()[end..]
+            .iter()
+            .take_while(|&&b| matches!(b, b'\r' | b'\n' | b'/'))
+            .count();
+        return end + tail;
+    }
+
+    whitespace_len(s)
+}
+
+/// `UPPER*LOWER+`, giving back upper-case characters until a lower-case
+/// run can follow, as the regex backtracks.
+fn upper_then_lower(s: &str) -> Option<usize> {
+    let upper = case_span(s, |(upper, _)| upper);
+    let starts = s[..upper].char_indices().rev().map(|(i, _)| i);
+    std::iter::once(upper).chain(starts).find_map(|at| {
+        let lower = case_span(&s[at..], |(_, lower)| lower);
+        (lower > 0).then_some(at + lower)
+    })
+}
+
+/// `UPPER+LOWER*`.
+fn upper_then_any_lower(s: &str) -> Option<usize> {
+    let upper = case_span(s, |(upper, _)| upper);
+    (upper > 0).then(|| upper + case_span(&s[upper..], |(_, lower)| lower))
+}
+
+fn case_span(s: &str, keep: impl Fn((bool, bool)) -> bool) -> usize {
+    s.char_indices()
+        .find(|&(_, c)| !keep(letter_case(c)))
+        .map_or(s.len(), |(i, _)| i)
 }
 
 fn llama3_len(s: &str, marks_in_words: bool, max_digits: usize) -> usize {
