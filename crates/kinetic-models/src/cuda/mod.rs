@@ -11,7 +11,7 @@
 //! recorded into a CUDA graph the first time and replayed after.
 //!
 //! Longer runs outside a checkpoint, such as a prompt, go through in batches
-//! of up to [`PREFILL_BATCH`] tokens on matrix-product, flash-attention and
+//! of up to [`CudaModel::prefill_batch`] tokens on matrix-product, flash-attention and
 //! chunked-recurrence kernels. They are as accurate as the decode kernels,
 //! but their sums run in another order, so their results differ slightly
 //! from token-by-token decoding; they do not depend on where a prompt is cut
@@ -65,15 +65,18 @@ pub use lanes::{Ran, Run};
 pub use mtp::CudaMtpState;
 pub use split::Placement;
 
-/// Most tokens one prefill pass runs; a state keeps buffers for this many.
-pub const PREFILL_BATCH: usize = 512;
+/// Most tokens one prefill pass runs on GPUs with tensor cores; a state
+/// keeps buffers for this many.
+const PREFILL_BATCH: usize = 512;
 
-/// Most tokens a server hands a model split over several GPUs at once while
-/// running a prompt: several batches, so that the first GPU runs the next
-/// batch while the last finishes this one. The model cuts them into the batches
-/// separate calls would run, so the results are the same; the host holds
-/// their hidden rows meanwhile.
-pub const PREFILL_CALL: usize = 8 * PREFILL_BATCH;
+/// The same on GPUs without tensor cores, whose passes pay a fixed cost per
+/// layer large enough that longer batches are worth their buffers.
+const PREFILL_BATCH_WIDE: usize = 1024;
+
+/// Batches a server hands a model split over several GPUs at once while
+/// running a prompt, so that the first GPU runs the next batch while the
+/// last finishes this one; see [`CudaModel::prefill_call`].
+const PREFILL_CALL_BATCHES: usize = 8;
 
 /// Prompt runs give the same bits wherever they are cut on multiples of
 /// this many tokens: every kernel sums a token's terms in an order that does
@@ -189,6 +192,8 @@ pub struct CudaModel<'m> {
     per_layer: Option<CudaPerLayer>,
     /// Most tokens one pass runs.
     rows: usize,
+    /// Most tokens one prefill pass runs, before the context limits it.
+    prefill: usize,
     mtp: Option<mtp::CudaMtp>,
     /// The routed experts and their cache, in a mixture-of-experts model.
     offload: Option<RefCell<Offload<'m>>>,
@@ -357,10 +362,14 @@ impl<'m> CudaModel<'m> {
             false => upload_mtp()?,
         };
         // every device runs the same passes, so the least capable decides
+        let prefill = others
+            .iter()
+            .map(|(g, _)| prefill_batch(&g.kernels))
+            .fold(prefill_batch(&gpu.kernels), usize::min);
         let rows = others
             .iter()
-            .map(|(g, _)| batch_rows(&g.kernels, context))
-            .fold(batch_rows(&gpu.kernels, context), usize::min);
+            .map(|(g, _)| batch_rows(&g.kernels, context, prefill))
+            .fold(batch_rows(&gpu.kernels, context, prefill), usize::min);
         let mut shard_layers = Vec::new();
         let (embd, front, layers) = match moes {
             Some(_) => {
@@ -440,6 +449,7 @@ impl<'m> CudaModel<'m> {
             shards,
             per_layer,
             rows,
+            prefill,
             mtp,
             gpu,
             offload: None,
@@ -458,8 +468,9 @@ impl<'m> CudaModel<'m> {
                 model.page_in_experts();
             }
         } else if cuda.batch_rows() > MAX_BATCH {
-            // perf: one set of 512-row buffers instead of one per sequence,
-            // ~230 MB each on Qwen3.5-4B, lets --parallel 4 fit in 6 GB
+            // perf: one set of full-batch buffers instead of one per
+            // sequence; with 512-token batches, ~230 MB each on Qwen3.5-4B,
+            // that let --parallel 4 fit in 6 GB
             let spare = cuda.new_work(cuda.batch_rows()).map_err(cuda_error)?;
             cuda.spare = Some(RefCell::new(Spare::new(spare)));
             if let Some(spare) = cuda.new_mtp_work(cuda.batch_rows()).map_err(cuda_error)? {
@@ -624,6 +635,23 @@ impl<'m> CudaModel<'m> {
 
     fn batch_rows(&self) -> usize {
         self.rows
+    }
+
+    /// Most tokens one prefill pass runs: 1024 on GPUs without tensor
+    /// cores, whose passes pay a fixed cost per layer that longer batches
+    /// pay less often, and 512 on the others, where longer ones only take
+    /// memory. Over several GPUs, the smallest of theirs.
+    pub fn prefill_batch(&self) -> usize {
+        self.prefill
+    }
+
+    /// Most tokens a server hands a model split over several GPUs at once
+    /// while running a prompt: several batches, so that the first GPU runs
+    /// the next batch while the last finishes this one. The model cuts them
+    /// into the batches separate calls would run, so the results are the
+    /// same; the host holds their hidden rows meanwhile.
+    pub fn prefill_call(&self) -> usize {
+        PREFILL_CALL_BATCHES * self.prefill
     }
 
     /// Device bytes held by `state`.
@@ -1299,13 +1327,22 @@ fn upload_experts_layers(gpu: &Gpu, model: &Model) -> Result<Vec<CudaLayer>, Loa
         .collect()
 }
 
-/// Tokens a pass runs at most: a prefill batch, or the whole context when
-/// that is shorter; a step on devices without large-batch kernels.
-fn batch_rows(kernels: &Kernels, context: usize) -> usize {
+/// Most tokens a prefill pass on a device with `kernels` runs.
+fn prefill_batch(kernels: &Kernels) -> usize {
+    match kernels.tensor_cores() {
+        true => PREFILL_BATCH,
+        false => PREFILL_BATCH_WIDE,
+    }
+}
+
+/// Tokens a pass runs at most: a prefill batch of `prefill`, or the whole
+/// context when that is shorter; a step on devices without large-batch
+/// kernels.
+fn batch_rows(kernels: &Kernels, context: usize, prefill: usize) -> usize {
     if !kernels.large_batches() {
         return MAX_BATCH;
     }
-    PREFILL_BATCH.min(context).max(MAX_BATCH)
+    prefill.min(context).max(MAX_BATCH)
 }
 
 /// Splits `tokens`, which follow `pos` others, into the batches a run

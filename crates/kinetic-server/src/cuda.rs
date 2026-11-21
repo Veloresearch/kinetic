@@ -5,9 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use kinetic_cuda::MAX_BATCH;
-use kinetic_models::cuda::{
-    CudaModel, CudaRunner, CudaState, Placement, PREFILL_BATCH, PREFILL_CALL, PREFILL_GRID,
-};
+use kinetic_models::cuda::{CudaModel, CudaRunner, CudaState, Placement, PREFILL_GRID};
 use kinetic_models::speculative::{Decoder, Ensemble, Policy};
 use kinetic_models::warm::{Runner, Warm};
 use kinetic_models::{LoadError, Model, State};
@@ -160,8 +158,9 @@ impl<'a> CudaBackend<'a> {
     /// starts resume where a cold prefill cuts its batches, so they give
     /// exactly its output.
     pub fn with_warm(mut self, warm: Warm<'a>) -> Self {
-        let batches = self.prefill_call() / PREFILL_BATCH;
-        self.warm = Some(warm.aligned(PREFILL_BATCH).batches_per_call(batches));
+        let batch = self.gpu.prefill_batch();
+        let batches = self.prefill_call() / batch;
+        self.warm = Some(warm.aligned(batch).batches_per_call(batches));
         self
     }
 
@@ -170,8 +169,8 @@ impl<'a> CudaBackend<'a> {
     /// so a model on one GPU cuts its prompts as it always has.
     fn prefill_call(&self) -> usize {
         match self.gpu.device_split().len() {
-            1 => PREFILL_BATCH,
-            _ => PREFILL_CALL,
+            1 => self.gpu.prefill_batch(),
+            _ => self.gpu.prefill_call(),
         }
     }
 
@@ -229,7 +228,8 @@ impl<'a> CudaBackend<'a> {
         self.unsettled = None;
         self.rewind(prompt);
         // The batches a cold prefill runs before its last one.
-        let head = &prompt[..(prompt.len() - 1) / PREFILL_BATCH * PREFILL_BATCH];
+        let batch = self.gpu.prefill_batch();
+        let head = &prompt[..(prompt.len() - 1) / batch * batch];
         // The empty sequence made at load time leaves warm starts their go.
         let warm = self.warm.is_some() && !head.is_empty();
         let fresh = |s: &Sequence<CudaState>| s.tokens.is_empty() && warm;
@@ -289,7 +289,7 @@ impl<'a> CudaBackend<'a> {
         // a cold run cuts off its last tokens past the grid only when too
         // few for a batch of their own; see `PREFILL_GRID`
         let step = match rest % PREFILL_GRID {
-            0 => PREFILL_BATCH,
+            0 => self.gpu.prefill_batch(),
             _ => PREFILL_GRID,
         };
         let last = start + (rest - 1) / step * step;
@@ -308,7 +308,7 @@ impl<'a> CudaBackend<'a> {
             policy,
             seq,
             prompt,
-            PREFILL_BATCH,
+            self.gpu.prefill_batch(),
         );
     }
 
@@ -445,7 +445,8 @@ impl<'a> CudaBackend<'a> {
     /// Takes the sequence a request for `prompt` would start from when it
     /// cannot continue the cached one: the longest warm prefix, or none.
     fn restart(&mut self, prompt: &[u32]) -> bool {
-        let head = &prompt[..(prompt.len() - 1) / PREFILL_BATCH * PREFILL_BATCH];
+        let batch = self.gpu.prefill_batch();
+        let head = &prompt[..(prompt.len() - 1) / batch * batch];
         if head.is_empty() {
             return false;
         }
@@ -505,7 +506,7 @@ impl<'a> CudaBackend<'a> {
             &mut seq,
             base,
             prompt,
-            PREFILL_BATCH,
+            self.gpu.prefill_batch(),
             PREFILL_GRID,
         );
         if ran && grid.is_some_and(|g| (seq.tokens.len() - base).is_multiple_of(g)) {

@@ -123,7 +123,8 @@ impl Work {
     ) -> kinetic_cuda::Result<Work> {
         let ctx = &gpu.ctx;
         // windows keep room for a full batch, which a spare may lend
-        let window_rows = super::batch_rows(&gpu.kernels, capacity).max(rows);
+        let prefill = super::prefill_batch(&gpu.kernels);
+        let window_rows = super::batch_rows(&gpu.kernels, capacity, prefill).max(rows);
         let states = layers
             .iter()
             .map(|l| l.new_state(gpu, capacity, window_rows))
