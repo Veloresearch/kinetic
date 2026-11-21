@@ -1,4 +1,5 @@
-//! Codebooks and value tables of IQ4_NL, IQ3_S, IQ2_S, IQ1_S, IQ1_M and MXFP4.
+//! Codebooks and value tables of IQ4_NL, IQ3_S, IQ2_S, IQ1_S, IQ1_M, MXFP4
+//! and NVFP4.
 //!
 //! The codebooks are stored as packed level indices and expanded at compile
 //! time; every kernel reads the expanded form from here.
@@ -33,6 +34,38 @@ pub fn e8m0_half(e: u8) -> f32 {
         (e as u32 - 1) << 23
     };
     f32::from_bits(bits)
+}
+
+/// An E4M3 float: a sign, four exponent bits biased by 7 and three mantissa
+/// bits. There are no infinities; a magnitude of 0x7F is NaN.
+pub fn e4m3(b: u8) -> f32 {
+    if b & 0x7F == 0x7F {
+        return f32::NAN;
+    }
+    let v = e4m3_magnitude(b & 0x7F);
+    if b & 0x80 == 0 {
+        v
+    } else {
+        -v
+    }
+}
+
+/// An NVFP4 block scale, unsigned E4M3, as half its value, which undoes the
+/// doubling of [`MXFP4_VALUES`]. The top bit is ignored and 0x7F reads as
+/// zero, as in gguf-py.
+pub fn ue4m3_half(b: u8) -> f32 {
+    if b == 0x7F {
+        return 0.0;
+    }
+    e4m3_magnitude(b & 0x7F) * 0.5
+}
+
+fn e4m3_magnitude(m: u8) -> f32 {
+    if m < 8 {
+        m as f32 / 512.0
+    } else {
+        f32::from_bits((m as u32 + (120 << 3)) << 20)
+    }
 }
 
 /// Expands packed level indices, `B` bits per value with the first value
@@ -80,5 +113,18 @@ mod tests {
         assert_eq!(e8m0_half(1), 2f32.powi(-127));
         assert_eq!(e8m0_half(0), 2f32.powi(-128));
         assert_eq!(e8m0_half(255), 2f32.powi(127));
+    }
+
+    #[test]
+    fn e4m3_values() {
+        assert_eq!(e4m3(0x38), 1.0);
+        assert_eq!(e4m3(0x7E), 448.0);
+        assert_eq!(e4m3(0x01), 2f32.powi(-9));
+        assert_eq!(e4m3(0x08), 2f32.powi(-6));
+        assert_eq!(e4m3(0xB8), -1.0);
+        assert!(e4m3(0x7F).is_nan() && e4m3(0xFF).is_nan());
+        assert_eq!(ue4m3_half(0x38), 0.5);
+        assert_eq!(ue4m3_half(0x7F), 0.0);
+        assert_eq!(ue4m3_half(0xFF), 240.0);
     }
 }

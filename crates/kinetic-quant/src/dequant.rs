@@ -4,6 +4,7 @@ use half::{bf16, f16};
 
 use crate::{iq, TensorType};
 
+mod e4m3;
 mod iq_s;
 mod legacy;
 mod low_k;
@@ -57,6 +58,8 @@ pub fn dequantize(ty: TensorType, src: &[u8], dst: &mut [f32]) -> Result<(), Uns
         TensorType::Q5_1 => legacy::q5_1_block,
         TensorType::IQ4NL => legacy::iq4_nl_block,
         TensorType::MXFP4 => legacy::mxfp4_block,
+        TensorType::NVFP4 => e4m3::nvfp4_block,
+        TensorType::F8E4M3 => e4m3::f8_e4m3_block,
         TensorType::Q2K => low_k::q2_k_block,
         TensorType::Q3K => low_k::q3_k_block,
         TensorType::TQ1_0 => ternary::tq1_0_block,

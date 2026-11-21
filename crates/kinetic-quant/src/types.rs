@@ -39,8 +39,10 @@ pub enum TensorType {
     TQ1_0 = 34,
     TQ2_0 = 35,
     MXFP4 = 39,
+    NVFP4 = 40,
     Q1_0 = 41,
     Q2_0 = 42,
+    F8E4M3 = 43,
     /// PrismML's Q2_0 with one scale per 128 values.
     PQ2_0 = 142,
     /// PrismML's TQ1_0 packing with one scale per 128 values.
@@ -83,8 +85,10 @@ impl TensorType {
             34 => TQ1_0,
             35 => TQ2_0,
             39 => MXFP4,
+            40 => NVFP4,
             41 => Q1_0,
             42 => Q2_0,
+            43 => F8E4M3,
             142 => PQ2_0,
             143 => PTQ1_0,
             _ => return None,
@@ -95,9 +99,9 @@ impl TensorType {
     pub fn block_len(self) -> usize {
         use TensorType::*;
         match self {
-            F32 | F16 | BF16 | F64 | I8 | I16 | I32 | I64 => 1,
+            F32 | F16 | BF16 | F64 | I8 | I16 | I32 | I64 | F8E4M3 => 1,
             Q4_0 | Q4_1 | Q5_0 | Q5_1 | Q8_0 | Q8_1 | IQ4NL | MXFP4 => 32,
-            Q2_0 => 64,
+            Q2_0 | NVFP4 => 64,
             Q1_0 | PQ2_0 | PTQ1_0 => 128,
             _ => 256,
         }
@@ -107,7 +111,7 @@ impl TensorType {
     pub fn block_bytes(self) -> usize {
         use TensorType::*;
         match self {
-            I8 => 1,
+            I8 | F8E4M3 => 1,
             F16 | BF16 | I16 => 2,
             F32 | I32 => 4,
             F64 | I64 => 8,
@@ -119,6 +123,7 @@ impl TensorType {
             Q8_1 => 36,
             IQ4NL => 18,
             MXFP4 => 17,
+            NVFP4 => 36,
             Q2K => 84,
             Q3K => 110,
             Q4K => 144,
@@ -186,6 +191,8 @@ impl TensorType {
             TQ1_0 => "TQ1_0",
             TQ2_0 => "TQ2_0",
             MXFP4 => "MXFP4",
+            NVFP4 => "NVFP4",
+            F8E4M3 => "F8_E4M3",
             Q1_0 => "Q1_0",
             Q2_0 => "Q2_0",
             PQ2_0 => "PQ2_0",
@@ -229,5 +236,12 @@ mod tests {
         assert_eq!(TensorType::PTQ1_0.bytes_for(128), Some(28));
         assert_eq!(TensorType::Q1_0.bytes_for(128), Some(18));
         assert_eq!(TensorType::Q2_0.bytes_for(128), Some(36));
+    }
+
+    #[test]
+    fn e4m3_sizes() {
+        assert_eq!(TensorType::NVFP4.bytes_for(128), Some(72));
+        assert_eq!(TensorType::NVFP4.bytes_for(32), None);
+        assert_eq!(TensorType::F8E4M3.bytes_for(3), Some(3));
     }
 }

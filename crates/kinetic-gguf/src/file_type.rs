@@ -62,6 +62,8 @@ fn file_type_name(id: u64) -> Option<&'static str> {
         36 => "TQ1_0",
         37 => "TQ2_0",
         38 => "MXFP4",
+        39 => "NVFP4",
+        42 => "F8_E4M3",
         _ => return None,
     })
 }
