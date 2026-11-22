@@ -453,7 +453,7 @@ impl Network<'_> {
     ) -> Vec<f32> {
         let mut cur = x;
         let d = self.d;
-        pool_norm(&mut cur, &self.embd_norm, d, self.eps);
+        self.norm_embeddings(&mut cur);
         let mut blocks: Vec<Vec<f32>> = Vec::new();
         let mut visit = 0;
         let mut run =
@@ -503,6 +503,11 @@ impl Network<'_> {
             cur = run(i, i, cur, &mut blocks, None);
         }
         mix_with(&blocks, &cur, &self.out_query, d).remove(0)
+    }
+
+    /// Normalizes token embeddings as the first layer reads them.
+    pub(crate) fn norm_embeddings(&self, x: &mut [f32]) {
+        pool_norm(x, &self.embd_norm, self.d, self.eps);
     }
 
     /// One layer on cache slot `layer` of physical layer `ip`, with the

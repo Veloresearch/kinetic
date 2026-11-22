@@ -781,6 +781,15 @@ impl Model<'_> {
         state.len -= fed - keep;
     }
 
+    /// The embeddings of `tokens` as the first layer reads them.
+    pub(crate) fn first_layer_input(&self, tokens: &[u32]) -> Vec<f32> {
+        let mut x = self.embed(tokens);
+        if let Some(network) = &self.network {
+            network.norm_embeddings(&mut x);
+        }
+        x
+    }
+
     pub(crate) fn embed(&self, tokens: &[u32]) -> Vec<f32> {
         let mut x = vec![0.0; tokens.len() * self.n_embd];
         embed_into(&self.embd, self.embd_scale, tokens, &mut x);

@@ -237,6 +237,11 @@ impl<'a> Dspark<'a> {
         self.block - 1
     }
 
+    /// The width of the target's hidden states the drafter reads.
+    pub fn n_embd(&self) -> usize {
+        self.d
+    }
+
     /// Tokens of the target's vocabulary the drafter scores.
     pub fn vocab(&self) -> usize {
         self.vocab

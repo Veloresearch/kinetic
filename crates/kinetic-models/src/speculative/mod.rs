@@ -27,8 +27,10 @@
 //! how well recent drafts did, and drafting pauses for longer and longer
 //! after drafts that miss outright.
 
+mod companion;
 mod draft;
 mod dry;
+mod dspark;
 mod ensemble;
 mod filters;
 mod logprobs;
@@ -41,8 +43,10 @@ mod target;
 #[cfg(test)]
 mod tests;
 
+pub use companion::{find_companion, load_companion, Companion, CompanionDrafter};
 pub use draft::Draft;
 pub use dry::dry_breakers;
+pub use dspark::DsparkCompanion;
 pub use ensemble::Ensemble;
 pub use logprobs::{Logprobs, TokenLogprob};
 pub use lookup::Lookup;
@@ -54,8 +58,10 @@ pub use target::Target;
 
 /// A source of draft tokens for target model `M`.
 pub trait Drafter<M: Target> {
-    /// Called with every token the model keeps, in order, and the
-    /// normalized final hidden state after each, `n_embd` values per token.
+    /// Called with every token the model keeps, in order, and the hidden
+    /// states the model returns for each, an equal number per token: the
+    /// normalized final state first, then any [`crate::Model::set_taps`]
+    /// asked for.
     fn observe(&mut self, _model: &M, _tokens: &[u32], _hidden: &[f32]) {}
 
     /// Up to `limit` tokens likely to follow `context`, whose last token is
@@ -263,7 +269,7 @@ impl<D> Decoder<D> {
             }
         }
         model.rollback_rows(state, &path);
-        let d = model.n_embd();
+        let d = hidden.len() / tokens.len();
         let kept: Vec<u32> = path.iter().map(|&r| tokens[r]).collect();
         let kept_hidden: Vec<f32> = path
             .iter()
