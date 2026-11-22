@@ -364,6 +364,126 @@ fn an_unrolled_array_must_repeat_the_core() {
     assert!(e.0.contains("differs between passes"), "{e}");
 }
 
+/// The tensors of a tiny DSpark drafter for the tiny model, which reads the
+/// inputs of its layer visits 1, 4 and 6 and its final state.
+fn tiny_drafter_tensors() -> Vec<(String, Vec<u64>)> {
+    let (q, kv, ff, rank) = (8, 4, 8, 3);
+    let mut t: Vec<(String, Vec<u64>)> = [
+        ("dspark_fuse.weight", vec![4, 4]),
+        ("dspark_hidden_out.bias", vec![D]),
+        ("dspark_hidden_out.weight", vec![rank, D]),
+        ("dspark_norm.weight", vec![D]),
+        ("joint_proj.bias", vec![3 * rank]),
+        ("joint_proj.weight", vec![2 * rank + 2 * D, 3 * rank]),
+        ("markov_w1.weight", vec![rank, 12]),
+        ("mask_embd.weight", vec![D]),
+        ("output_norm.weight", vec![D]),
+    ]
+    .into_iter()
+    .map(|(n, d)| (n.to_string(), d))
+    .collect();
+    for i in 0..3 {
+        let mut add = |name: &str, dims: Vec<u64>| t.push((format!("blk.{i}.{name}"), dims));
+        add("attn_q.weight", vec![D, q]);
+        add("attn_k.weight", vec![D, kv]);
+        add("attn_v.weight", vec![D, kv]);
+        add("attn_output.weight", vec![q, D]);
+        add("attn_k_ctx.weight", vec![D, kv]);
+        add("attn_v_ctx.weight", vec![D, kv]);
+        add("attn_q_norm.weight", vec![4]);
+        add("attn_k_norm.weight", vec![4]);
+        add("attn_k_ctx_norm.weight", vec![4]);
+        add("attn_norm.weight", vec![D]);
+        add("dflare_norm.weight", vec![D]);
+        add("ffn_norm.weight", vec![D]);
+        add("ffn_gate.weight", vec![D, ff]);
+        add("ffn_up.weight", vec![D, ff]);
+        add("ffn_down.weight", vec![ff, D]);
+    }
+    t
+}
+
+fn tiny_drafter_weights() -> Vec<(String, Vec<u64>, Vec<f32>)> {
+    tiny_drafter_tensors()
+        .into_iter()
+        .enumerate()
+        .map(|(k, (name, dims))| {
+            let n: u64 = dims.iter().product();
+            let shift = if name.contains("norm") { 1.0 } else { 0.0 };
+            let values = (0..n as usize)
+                .map(|i| (((i * (2 * k + 5) + 3 * k) % 19) as f32 - 9.0) * 0.09 + shift)
+                .collect();
+            (name, dims, values)
+        })
+        .collect()
+}
+
+fn tiny_drafter_keys() -> Vec<(&'static str, Value)> {
+    vec![
+        ("block_count", Value::U32(3)),
+        ("context_length", Value::U32(64)),
+        ("embedding_length", Value::U32(D as u32)),
+        ("feed_forward_length", Value::U32(8)),
+        ("attention.head_count", Value::U32(2)),
+        ("attention.head_count_kv", Value::U32(1)),
+        ("rope.freq_base", Value::F32(1e6)),
+        ("attention.layer_norm_rms_epsilon", Value::F32(1e-6)),
+        ("attention.key_length", Value::U32(4)),
+        ("attention.value_length", Value::U32(4)),
+        ("vocab_size", Value::U32(12)),
+        ("vocab_size_unpadded", Value::U32(10)),
+        ("block_size", Value::U32(8)),
+        (
+            "target_layers",
+            Value::Array([1, 4, 6, 8].map(Value::U32).to_vec()),
+        ),
+        ("dspark.markov_rank", Value::U32(3)),
+        ("sample_from_anchor", Value::Bool(false)),
+        ("has_confidence_head", Value::Bool(false)),
+        ("attention.causal", Value::Bool(false)),
+        ("attention.sliding_window", Value::U32(3)),
+        (
+            "attention.sliding_window_pattern",
+            Value::Array([true, false, true].map(Value::Bool).to_vec()),
+        ),
+        ("rope.dimension_count", Value::U32(4)),
+        ("final_logit_softcapping", Value::F32(30.0)),
+    ]
+}
+
+fn tiny_drafter() -> Memory {
+    write("dflash", tiny_drafter_keys(), &tiny_drafter_weights())
+}
+
+#[test]
+fn the_drafter_loads_through_the_guard() {
+    let file = tiny_drafter();
+    let dspark = kinetic_models::Dspark::load(&file).unwrap();
+    assert_eq!(dspark.target_layers(), [1, 4, 6, 8]);
+    assert_eq!(dspark.max_draft(), 7);
+
+    let mut weights = tiny_drafter_weights();
+    weights.push(("blk.0.attn_k_ctx.bias".into(), vec![4], vec![0.0; 4]));
+    let extra = write("dflash", tiny_drafter_keys(), &weights);
+    let Err(e) = kinetic_models::Dspark::load(&extra) else {
+        panic!("a drafter with an unread tensor loaded")
+    };
+    assert!(e.0.ends_with(": blk.0.attn_k_ctx.bias"), "{e}");
+}
+
+/// The published drafter loads, every tensor and key read.
+///
+/// KINETIC_TEST_DSPARK=dspark-Inkling-2-Mini-Q8_0.gguf cargo test --release -p kinetic-models --test inkling -- --ignored drafter
+#[test]
+#[ignore]
+fn the_published_drafter_loads() {
+    let path = std::env::var("KINETIC_TEST_DSPARK").expect("set KINETIC_TEST_DSPARK");
+    let file = GgufFile::open(&path).unwrap();
+    let dspark = kinetic_models::Dspark::load(&file).unwrap();
+    assert_eq!(dspark.target_layers(), [5, 23, 41, 48]);
+    assert_eq!(dspark.max_draft(), 7);
+}
+
 const LOGITS: [f32; 40] = [
     1.337009, 0.8481389, -0.7500277, -1.971547, 0.6931028, 0.5891846, -2.125962, 1.414415,
     0.4340913, -0.6725019, -0.4141479, 0.8115726, -1.191427, -0.212345, 0.7890617, 0.707845,
