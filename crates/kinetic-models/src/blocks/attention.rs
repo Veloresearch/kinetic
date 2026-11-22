@@ -7,6 +7,7 @@ use super::folding::Folding;
 use super::tree::{leading, Tree};
 
 mod bidirectional;
+mod block;
 
 /// Rotary position embedding: only the first `dims` values of a head
 /// rotate, in pairs laid out as `layout` says.
@@ -329,25 +330,12 @@ impl Attention<'_> {
         }
 
         let q_head_len = q_stride / self.n_head;
-        let prepare = |t: usize, q: &mut [f32], mut k: Option<&mut [f32]>| {
+        let prepare = |t: usize, q: &mut [f32], k: Option<&mut [f32]>| {
             let angles = match grid {
                 Some(grid) => self.rope.grid_angles(grid[t]),
                 None => self.rope.angles(pos0 + depth(t)),
             };
-            if !self.norm_after_rope {
-                self.norm(q, q_head_len, &self.q_norm);
-                k.iter_mut().for_each(|k| self.norm(k, hd, &self.k_norm));
-            }
-            for head in k.iter_mut().flat_map(|k| k.chunks_exact_mut(hd)) {
-                self.rope.rotate(head, &angles);
-            }
-            for head in q.chunks_exact_mut(q_head_len) {
-                self.rope.rotate(&mut head[..hd], &angles);
-            }
-            if self.norm_after_rope {
-                self.norm(q, q_head_len, &self.q_norm);
-                k.iter_mut().for_each(|k| self.norm(k, hd, &self.k_norm));
-            }
+            self.prepare(q, k, &angles);
         };
         if borrowed {
             pool::for_each_chunk(&mut q, q_stride, |t, q| prepare(t, q, None));
@@ -407,6 +395,27 @@ impl Attention<'_> {
         match &self.folding {
             Some(f) => f.rotate(&out, self.o.cols),
             None => out,
+        }
+    }
+
+    /// Normalizes and rotates one token's queries, and its keys when given,
+    /// by `angles`.
+    fn prepare(&self, q: &mut [f32], mut k: Option<&mut [f32]>, angles: &[(f32, f32)]) {
+        let hd = self.head_dim;
+        let q_head_len = self.q.rows / self.n_head;
+        if !self.norm_after_rope {
+            self.norm(q, q_head_len, &self.q_norm);
+            k.iter_mut().for_each(|k| self.norm(k, hd, &self.k_norm));
+        }
+        for head in k.iter_mut().flat_map(|k| k.chunks_exact_mut(hd)) {
+            self.rope.rotate(head, angles);
+        }
+        for head in q.chunks_exact_mut(q_head_len) {
+            self.rope.rotate(&mut head[..hd], angles);
+        }
+        if self.norm_after_rope {
+            self.norm(q, q_head_len, &self.q_norm);
+            k.iter_mut().for_each(|k| self.norm(k, hd, &self.k_norm));
         }
     }
 

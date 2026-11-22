@@ -28,7 +28,7 @@ use std::fmt;
 
 use kinetic_gguf::TensorSource;
 
-pub use arch::dspark::Dspark;
+pub use arch::dspark::{Dspark, DsparkState};
 pub use arch::rope::{RopeScaling, ScalingKind};
 use arch::{Basics, Body, Stack};
 pub use convoy::Seat;
