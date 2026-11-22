@@ -516,17 +516,327 @@ fn the_drafter_loads_through_the_guard() {
     assert!(e.0.ends_with(": blk.0.attn_k_ctx.bias"), "{e}");
 }
 
-/// The published drafter loads, every tensor and key read.
+/// The published drafter loads, every tensor and key read, and drafts a
+/// whole block from made-up hidden states of the target's width through a
+/// made-up output head, since the target is not needed for that.
 ///
 /// KINETIC_TEST_DSPARK=dspark-Inkling-2-Mini-Q8_0.gguf cargo test --release -p kinetic-models --test inkling -- --ignored drafter
 #[test]
 #[ignore]
-fn the_published_drafter_loads() {
+fn the_published_drafter_loads_and_drafts() {
     let path = std::env::var("KINETIC_TEST_DSPARK").expect("set KINETIC_TEST_DSPARK");
     let file = GgufFile::open(&path).unwrap();
     let dspark = kinetic_models::Dspark::load(&file).unwrap();
     assert_eq!(dspark.target_layers(), [5, 23, 41, 48]);
     assert_eq!(dspark.max_draft(), 7);
+    let (d, vocab) = (dspark.n_embd(), dspark.vocab());
+    let mut seed = 1u32;
+    let mut noise = |n: usize, scale: f32| -> Vec<f32> {
+        (0..n)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((seed >> 8) as f32 / (1 << 24) as f32 - 0.5) * scale
+            })
+            .collect()
+    };
+    let mut state = dspark.new_state();
+    dspark.commit(&mut state, &noise(5 * 4 * d, 4.0));
+    dspark.commit(&mut state, &noise(4 * d, 4.0));
+    assert_eq!(state.len(), 6);
+    let head = noise(d, 1.0);
+    let draft = dspark.draft(&state, 1000, &noise(d, 2.0), 7, |h| {
+        (0..vocab).map(|i| h[i % d] * head[i * 7 % d]).collect()
+    });
+    assert_eq!(draft.len(), 7);
+    for (token, p) in draft {
+        assert!((token as usize) < vocab && p.is_finite() && p > 0.0 && p <= 1.0);
+    }
+}
+
+/// The tiny model's run of `tokens` with the taps the tiny drafter reads:
+/// each position's features in the drafter's order.
+fn tiny_features(model: &mut kinetic_models::Model, tokens: &[u32]) -> Vec<f32> {
+    let d = D as usize;
+    model.set_taps(vec![1, 4, 6]);
+    let hidden = model.run(&mut model.new_state(), tokens, true).hidden;
+    hidden
+        .chunks_exact(4 * d)
+        .flat_map(|row| [&row[d..], &row[..d]].concat())
+        .collect()
+}
+
+/// Speculative greedy decoding with the drafter, after rejected drafts and
+/// rollbacks too, gives plain greedy decoding token for token.
+#[test]
+fn speculative_greedy_with_the_drafter_is_plain_greedy() {
+    use kinetic_models::speculative::{
+        CompanionDrafter, Decoder, DsparkCompanion, Greedy, Lookup, Policy,
+    };
+
+    let (target, drafter) = (tiny_model(), tiny_drafter());
+    let prompt = [3, 7, 1, 9, 3, 7];
+    let n = 40;
+    let plain = {
+        let model = kinetic_models::load(&target).unwrap();
+        let mut state = model.new_state();
+        let mut context = prompt.to_vec();
+        let (mut scores, _) = Greedy.score(&model, &mut state, &prompt, false);
+        while context.len() < prompt.len() + n {
+            let t = Greedy.choose(&model, &scores, 0, &context);
+            context.push(t);
+            scores = Greedy.score(&model, &mut state, &[t], false).0;
+        }
+        context
+    };
+    for lookup in [false, true] {
+        let mut model = kinetic_models::load(&target).unwrap();
+        let dspark = kinetic_models::Dspark::load(&drafter).unwrap();
+        let companion = Box::new(DsparkCompanion::new(dspark));
+        let mut drafter = CompanionDrafter::new(companion, &mut model).unwrap();
+        drafter.lookup = lookup.then(Lookup::default);
+        let mut decoder = Decoder::new(drafter);
+        decoder.max_pause = 0;
+        let mut state = model.new_state();
+        let mut context = prompt.to_vec();
+        decoder.prefill(&model, &mut Greedy, &mut state, &context, 0);
+        let (mut drafted, mut accepted) = (0, 0);
+        while context.len() < prompt.len() + n {
+            let limit = prompt.len() + n - context.len();
+            let step = decoder.step(&model, &mut Greedy, &mut state, &mut context, limit, |_| {
+                false
+            });
+            drafted += step.drafted;
+            accepted += step.tokens - 1;
+        }
+        assert_eq!(context, plain, "lookup {lookup:?}");
+        assert!(
+            0 < accepted && accepted < drafted,
+            "{accepted} of {drafted}"
+        );
+    }
+}
+
+/// A drafter beside its target is found when its header fits the target,
+/// refused when it does not, and nothing is found when there is none.
+#[test]
+fn the_companion_beside_a_model_is_found_and_checked() {
+    use kinetic_models::speculative::find_companion;
+
+    let folder = std::env::temp_dir().join(format!("kinetic-companion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    let target = tiny_model();
+    let model = folder.join("tiny.gguf");
+    std::fs::write(&model, &target.bytes).unwrap();
+    let find =
+        |explicit: Option<&std::path::Path>| find_companion(&model, &target.header, explicit);
+
+    assert_eq!(find(None).unwrap(), None);
+    let drafter = folder.join("dspark-tiny-Q8_0.gguf");
+    std::fs::write(&drafter, &tiny_drafter().bytes).unwrap();
+    assert_eq!(find(None).unwrap(), Some(drafter.clone()));
+
+    let mut keys = tiny_drafter_keys();
+    keys.retain(|(k, _)| *k != "embedding_length");
+    keys.push(("embedding_length", Value::U32(16)));
+    let wide = folder.join("wide.gguf");
+    std::fs::write(&wide, &write("dflash", keys, &tiny_drafter_weights()).bytes).unwrap();
+    let e = find(Some(&wide)).unwrap_err();
+    assert!(
+        e.0.contains("is not a drafter for this inkling2_loop model"),
+        "{e}"
+    );
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// One draft of the tiny drafter against a float64 reading of llama.cpp's
+/// Inkling 2 DSpark graph (Unsloth's src/models/dspark.cpp) and its
+/// noncausal mask, in which the whole block shares the anchor's window.
+#[test]
+fn a_draft_matches_the_reference() {
+    let d = D as usize;
+    let tokens = [3u32, 7, 1, 9, 3, 7];
+    let anchor = 2u32;
+    let target = tiny_model();
+    let mut model = kinetic_models::load(&target).unwrap();
+    let features = tiny_features(&mut model, &tokens);
+    let drafter = tiny_drafter();
+    let dspark = kinetic_models::Dspark::load(&drafter).unwrap();
+
+    let tw = tiny_weights();
+    let dw = tiny_drafter_weights();
+    let from = |weights: &[(String, Vec<u64>, Vec<f32>)], name: &str| -> Vec<f64> {
+        let t = weights.iter().find(|t| t.0 == name).unwrap();
+        t.2.iter().map(|&v| v as f64).collect()
+    };
+    let w = |name: &str| from(&dw, name);
+    let matvec = |m: &[f64], x: &[f64]| -> Vec<f64> {
+        m.chunks_exact(x.len())
+            .map(|r| r.iter().zip(x).map(|(a, b)| a * b).sum())
+            .collect()
+    };
+    let rms = |x: &[f64], w: &[f64]| -> Vec<f64> {
+        let s = (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64 + 1e-6).sqrt();
+        x.iter().zip(w).map(|(x, w)| x / s * w).collect()
+    };
+    let rope = |x: &mut [f64], pos: usize| {
+        for i in 0..2 {
+            let theta = pos as f64 * 1e6f64.powf(-(2.0 * i as f64) / 4.0);
+            let (a, b) = (x[i], x[i + 2]);
+            x[i] = a * theta.cos() - b * theta.sin();
+            x[i + 2] = a * theta.sin() + b * theta.cos();
+        }
+    };
+    let softmax = |x: &mut [f64]| {
+        let m = x.iter().cloned().fold(f64::MIN, f64::max);
+        x.iter_mut().for_each(|v| *v = (*v - m).exp());
+        let s: f64 = x.iter().sum();
+        x.iter_mut().for_each(|v| *v /= s);
+    };
+    let fuse = w("dspark_fuse.weight");
+    let mix = |pos: usize, row: usize, norm: &[f64]| -> Vec<f64> {
+        let mut weights = fuse[row * 4..][..4].to_vec();
+        softmax(&mut weights);
+        let f = &features[pos * 4 * d..][..4 * d];
+        let x: Vec<f64> = (0..d)
+            .map(|i| (0..4).map(|k| weights[k] * f[k * d + i] as f64).sum())
+            .collect();
+        rms(&x, norm)
+    };
+
+    let pos0 = tokens.len();
+    let embd = from(&tw, "token_embd.weight");
+    let anchor_row = rms(
+        &embd[anchor as usize * d..][..d],
+        &from(&tw, "token_embd_norm.weight"),
+    );
+    let mask = w("mask_embd.weight");
+    let mut x: Vec<Vec<f64>> = (0..8)
+        .map(|t| {
+            if t == 0 {
+                anchor_row.clone()
+            } else {
+                mask.clone()
+            }
+        })
+        .collect();
+    for il in 0..3 {
+        let t = |s: &str| w(&format!("blk.{il}.{s}"));
+        let visible = if il == 1 { 0..pos0 } else { pos0 - 3..pos0 };
+        let (mut keys, mut values) = (Vec::new(), Vec::new());
+        for p in visible {
+            let c = mix(p, il, &t("dflare_norm.weight"));
+            let mut k = rms(
+                &matvec(&t("attn_k_ctx.weight"), &c),
+                &t("attn_k_ctx_norm.weight"),
+            );
+            rope(&mut k, p);
+            keys.push(k);
+            values.push(matvec(&t("attn_v_ctx.weight"), &c));
+        }
+        let h: Vec<Vec<f64>> = x.iter().map(|r| rms(r, &t("attn_norm.weight"))).collect();
+        let mut queries = Vec::new();
+        for (j, h) in h.iter().enumerate() {
+            let q = matvec(&t("attn_q.weight"), h);
+            queries.push(
+                q.chunks_exact(4)
+                    .map(|q| {
+                        let mut q = rms(q, &t("attn_q_norm.weight"));
+                        rope(&mut q, pos0 + j);
+                        q
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let mut k = rms(&matvec(&t("attn_k.weight"), h), &t("attn_k_norm.weight"));
+            rope(&mut k, pos0 + j);
+            keys.push(k);
+            values.push(matvec(&t("attn_v.weight"), h));
+        }
+        for (j, row) in x.iter_mut().enumerate() {
+            let mut out = Vec::new();
+            for q in &queries[j] {
+                let mut s: Vec<f64> = keys
+                    .iter()
+                    .map(|k| k.iter().zip(q).map(|(a, b)| a * b).sum::<f64>() * 0.5)
+                    .collect();
+                softmax(&mut s);
+                out.extend(
+                    (0..4).map(|i| s.iter().zip(&values).map(|(s, v)| s * v[i]).sum::<f64>()),
+                );
+            }
+            let o = matvec(&t("attn_output.weight"), &out);
+            row.iter_mut().zip(o).for_each(|(x, o)| *x += o);
+            let h = rms(row, &t("ffn_norm.weight"));
+            let (g, u) = (
+                matvec(&t("ffn_gate.weight"), &h),
+                matvec(&t("ffn_up.weight"), &h),
+            );
+            let a: Vec<f64> = g
+                .iter()
+                .zip(u)
+                .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
+                .collect();
+            let f = matvec(&t("ffn_down.weight"), &a);
+            row.iter_mut().zip(f).for_each(|(x, f)| *x += f);
+        }
+    }
+    let hidden: Vec<Vec<f64>> = x.iter().map(|r| rms(r, &w("output_norm.weight"))).collect();
+    let context = mix(pos0 - 1, 3, &w("dspark_norm.weight"));
+    let (markov, joint, joint_b) = (
+        w("markov_w1.weight"),
+        w("joint_proj.weight"),
+        w("joint_proj.bias"),
+    );
+    let (corr, corr_b, out) = (
+        w("dspark_hidden_out.weight"),
+        w("dspark_hidden_out.bias"),
+        from(&tw, "output.weight"),
+    );
+    let mut state = [0.0; 3];
+    let mut prev = anchor as usize;
+    let mut want = Vec::new();
+    for h in &hidden[1..] {
+        let input = [&state[..], &markov[prev * 3..][..3], h, &context].concat();
+        let j: Vec<f64> = matvec(&joint, &input)
+            .iter()
+            .zip(&joint_b)
+            .map(|(a, b)| a + b)
+            .collect();
+        for i in 0..3 {
+            let (g, c) = (1.0 / (1.0 + (-j[i]).exp()), j[3 + i].tanh());
+            state[i] = c + g * (state[i] - c);
+        }
+        let latent: Vec<f64> = j[6..].iter().map(|v| v.tanh()).collect();
+        let c = matvec(&corr, &latent);
+        let y: Vec<f64> = (0..d).map(|i| h[i] + c[i] + corr_b[i]).collect();
+        let logits: Vec<f64> = matvec(&out[..10 * d], &y)
+            .iter()
+            .map(|l| 30.0 * (l / 30.0).tanh())
+            .collect();
+        let best = (0..10).fold(0, |b, i| if logits[i] > logits[b] { i } else { b });
+        let total: f64 = logits.iter().map(|l| (l - logits[best]).exp()).sum();
+        want.push((best as u32, 1.0 / total));
+        prev = best;
+    }
+
+    let mut state = dspark.new_state();
+    dspark.commit(&mut state, &features[..4 * 4 * d]);
+    dspark.commit(&mut state, &features[4 * 4 * d..]);
+    let anchor_f32: Vec<f32> = anchor_row.iter().map(|&v| v as f32).collect();
+    let head: Vec<f32> = out[..10 * d].iter().map(|&v| v as f32).collect();
+    let got = dspark.draft(&state, anchor, &anchor_f32, 7, |h| {
+        head.chunks_exact(d)
+            .map(|r| r.iter().zip(h).map(|(a, b)| a * b).sum())
+            .collect()
+    });
+    assert_eq!(got.len(), 7);
+    for (i, ((t, p), (wt, wp))) in got.iter().zip(&want).enumerate() {
+        assert_eq!(t, wt, "token {i}");
+        assert!(
+            (*p as f64 - wp).abs() < 1e-4,
+            "chance {i}: {p} against {wp}"
+        );
+    }
 }
 
 const LOGITS: [f32; 40] = [
