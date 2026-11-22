@@ -10,7 +10,7 @@ use kinetic_gguf::Value;
 use super::{Basics, Family, Stack};
 use crate::blocks::{mix, Control, Gating, Glu, Mixer, MixerState, Moe, RelAttention, Tree};
 use crate::loader::Loader;
-use crate::model::Layer;
+use crate::model::{tap, Layer};
 use crate::LoadError;
 
 pub(crate) const FAMILY: Family = Family::decoder(&["inkling2", "inkling2_loop"], build);
@@ -437,7 +437,10 @@ impl Params {
 impl Network<'_> {
     /// Runs the token embeddings `x` of a batch from position `pos0`
     /// through `layers`, the physical ones and then those of every later
-    /// pass of the core, and returns the input of the output norm.
+    /// pass of the core, and returns the input of the output norm. The
+    /// input of each layer visit in `taps`, counted in the order the layers
+    /// run, goes to its slot of `tapped`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn forward(
         &self,
         layers: &[Layer],
@@ -445,13 +448,18 @@ impl Network<'_> {
         pos0: usize,
         tree: Option<&Tree>,
         states: &mut [MixerState],
+        taps: &[usize],
+        tapped: &mut [Vec<f32>],
     ) -> Vec<f32> {
         let mut cur = x;
         let d = self.d;
         pool_norm(&mut cur, &self.embd_norm, d, self.eps);
         let mut blocks: Vec<Vec<f32>> = Vec::new();
+        let mut visit = 0;
         let mut run =
             |slot: usize, ip: usize, cur: Vec<f32>, blocks: &mut Vec<Vec<f32>>, message| {
+                tap(taps, visit, &cur, tapped);
+                visit += 1;
                 self.layer(
                     &layers[slot],
                     ip,

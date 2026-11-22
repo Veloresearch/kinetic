@@ -183,6 +183,7 @@ pub(crate) fn build<'a>(
         mtp,
         network,
         grid_rope: file.header().arch_key("rope.dimension_sections").is_some(),
+        taps: Vec::new(),
         shortlist: Default::default(),
         convoy: Default::default(),
     })

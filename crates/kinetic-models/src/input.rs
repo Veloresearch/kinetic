@@ -183,6 +183,7 @@ mod tests {
             mtp: None,
             network: None,
             grid_rope,
+            taps: Vec::new(),
             shortlist: Default::default(),
             convoy: Default::default(),
         }

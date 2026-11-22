@@ -76,6 +76,29 @@ fn batches_match_tokens_one_by_one() {
     }
 }
 
+/// Taps add layer inputs to every row and change no logit and no final
+/// state.
+#[test]
+#[ignore = "needs KINETIC_TEST_GGUF"]
+fn taps_change_no_output() {
+    let file = open();
+    let plain = kinetic_models::load(&file).unwrap();
+    let prompt = &prompt(plain.n_vocab())[..8];
+    let want = plain.run(&mut plain.new_state(), prompt, true);
+    let mut model = kinetic_models::load(&file).unwrap();
+    let last = model.n_layers() - 1;
+    model.set_taps(vec![last, 0]);
+    let got = model.run(&mut model.new_state(), prompt, true);
+    assert_eq!(bits(&got.logits), bits(&want.logits));
+    let d = model.n_embd();
+    let rows: Vec<&[f32]> = got.hidden.chunks_exact(3 * d).collect();
+    assert_eq!(rows.len(), prompt.len());
+    for (row, h) in rows.iter().zip(want.hidden.chunks_exact(d)) {
+        assert_eq!(bits(&row[..d]), bits(h));
+        assert!(row.iter().all(|v| v.is_finite()));
+    }
+}
+
 #[test]
 #[ignore = "needs KINETIC_TEST_GGUF"]
 fn tree_rows_match_their_paths_alone() {

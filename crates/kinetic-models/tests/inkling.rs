@@ -342,6 +342,51 @@ fn the_unrolled_layout_runs_the_same_model() {
     assert_eq!(logits(&model, &[4]), want);
 }
 
+/// Taps change no logit and no final state, count the visits of every pass
+/// alike in both layouts, and the first visit reads the normalized
+/// embedding.
+#[test]
+fn taps_add_layer_inputs_and_change_nothing_else() {
+    let d = D as usize;
+    let tokens = [3, 7, 1, 9];
+    let run = |file: &Memory, taps: Vec<usize>| {
+        let mut model = kinetic_models::load(file).unwrap();
+        model.set_taps(taps);
+        let mut state = model.new_state();
+        let mut f = model.run(&mut state, &tokens[..3], true);
+        let last = model.run(&mut state, &tokens[3..], true);
+        f.logits.extend(last.logits);
+        f.hidden.extend(last.hidden);
+        (f.logits, f.hidden)
+    };
+    let (looped, unrolled) = (tiny_model(), unrolled_model());
+    let (logits, hidden) = run(&looped, Vec::new());
+    let taps = vec![0, 4, 6, 3];
+    let (tapped_logits, tapped) = run(&looped, taps.clone());
+    assert_eq!(tapped_logits, logits);
+    assert_eq!(tapped.len(), hidden.len() * (1 + taps.len()));
+    let row = d * (1 + taps.len());
+    for (r, h) in hidden.chunks_exact(d).enumerate() {
+        assert_eq!(&tapped[r * row..][..d], h);
+    }
+    assert_eq!(
+        run(&unrolled, taps.clone()),
+        (tapped_logits, tapped.clone())
+    );
+
+    let weights = tiny_weights();
+    let table = |name: &str| &weights.iter().find(|w| w.0 == name).unwrap().2;
+    let (embd, norm) = (table("token_embd.weight"), table("token_embd_norm.weight"));
+    for (r, &t) in tokens.iter().enumerate() {
+        let e = &embd[t as usize * d..][..d];
+        let rms = (e.iter().map(|v| v * v).sum::<f32>() / d as f32 + 1e-6).sqrt();
+        for (i, got) in tapped[r * row + d..][..d].iter().enumerate() {
+            let want = e[i] / rms * norm[i];
+            assert!((got - want).abs() < 1e-5, "row {r} value {i}: {got} {want}");
+        }
+    }
+}
+
 /// An unrolled array whose later passes do not repeat the core is refused.
 #[test]
 fn an_unrolled_array_must_repeat_the_core() {

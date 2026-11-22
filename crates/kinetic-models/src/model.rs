@@ -142,6 +142,8 @@ pub struct Model<'a> {
     /// Whether attention takes (time, row, column) rotary positions, which
     /// give an image fewer positions than it has tokens.
     pub(crate) grid_rope: bool,
+    /// Layer visits whose input hidden states [`Forward::hidden`] carries.
+    pub(crate) taps: Vec<usize>,
     /// Built on first use by [`Model::run_top`].
     pub(crate) shortlist: OnceLock<Option<Shortlist>>,
     /// Gathers the runs of sequences that hold a [`Seat`] into shared passes.
@@ -222,7 +224,8 @@ impl State {
 }
 
 /// The result of running a batch: logits for the requested rows and the
-/// normalized final hidden state of every token.
+/// normalized final hidden state of every token, followed in each row by
+/// the input of every layer visit [`Model::set_taps`] asked for.
 pub struct Forward {
     pub logits: Vec<f32>,
     pub hidden: Vec<f32>,
@@ -256,6 +259,20 @@ impl Model<'_> {
 
     pub fn n_layers(&self) -> usize {
         self.layers.len()
+    }
+
+    /// Makes every run also return, in each row of [`Forward::hidden`] after
+    /// the final hidden state, the input hidden state of each layer visit in
+    /// `visits`, counted as the layers run, every pass of a loop included.
+    /// Runs with taps go one sequence at a time on the CPU.
+    ///
+    /// Panics on a visit past the last layer.
+    pub fn set_taps(&mut self, visits: Vec<usize>) {
+        assert!(
+            visits.iter().all(|&v| v < self.layers.len()),
+            "a tap past the last layer"
+        );
+        self.taps = visits;
     }
 
     /// Reads the routed experts of a mixture-of-experts model into memory,
@@ -385,7 +402,7 @@ impl Model<'_> {
             .per_layer
             .as_ref()
             .map_or_else(Vec::new, |p| p.inputs(tokens, &x, self.eps));
-        if grid.is_some() || tree.is_some() {
+        if grid.is_some() || tree.is_some() || !self.taps.is_empty() {
             return self.run_alone(state, x, &inputs, grid, tree, all_logits, top);
         }
         let lane = Lane {
@@ -535,11 +552,21 @@ impl Model<'_> {
     ) -> Forward {
         let d = self.n_embd;
         let pos0 = state.pos - state.rope_shift();
+        let mut tapped = vec![Vec::new(); self.taps.len()];
         if let Some(network) = &self.network {
             assert!(grid.is_none(), "this model takes no images");
-            x = network.forward(&self.layers, x, pos0, tree, &mut state.layers);
+            x = network.forward(
+                &self.layers,
+                x,
+                pos0,
+                tree,
+                &mut state.layers,
+                &self.taps,
+                &mut tapped,
+            );
         } else {
             for (i, layer) in self.layers.iter().enumerate() {
+                tap(&self.taps, i, &x, &mut tapped);
                 if let Some(from) = layer.mixer.kv_source() {
                     lend_kv(&mut state.layers, from, i);
                 }
@@ -558,13 +585,21 @@ impl Model<'_> {
         } else {
             &x[x.len() - d..]
         };
-        Forward {
-            logits: match top {
-                Some(top) => self.head_top(rows, top),
-                None => self.head(rows),
-            },
-            hidden: x,
+        let logits = match top {
+            Some(top) => self.head_top(rows, top),
+            None => self.head(rows),
+        };
+        if !tapped.is_empty() {
+            x = x
+                .chunks_exact(d)
+                .enumerate()
+                .flat_map(|(r, row)| {
+                    let taps = tapped.iter().map(move |t| &t[r * d..][..d]);
+                    std::iter::once(row).chain(taps).flatten().copied()
+                })
+                .collect();
         }
+        Forward { logits, hidden: x }
     }
 
     /// Marks the current length so a later [`Model::rollback`] can return to
@@ -802,6 +837,16 @@ impl Model<'_> {
 
     fn norm_rows(&self, x: &mut [f32], w: &[f32]) {
         pool::for_each_chunk(x, self.n_embd, |_, row| rms_norm(row, w, self.eps));
+    }
+}
+
+/// Copies `x`, the input of layer visit `visit`, to the slot of each tap
+/// that asks for it.
+pub(crate) fn tap(taps: &[usize], visit: usize, x: &[f32], tapped: &mut [Vec<f32>]) {
+    for (&t, slot) in taps.iter().zip(tapped) {
+        if t == visit {
+            *slot = x.to_vec();
+        }
     }
 }
 
