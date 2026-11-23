@@ -42,3 +42,7 @@ then add its row here and its digest with
 | `bert.gguf` | [mixedbread-ai/mxbai-embed-large-v1](https://huggingface.co/mixedbread-ai/mxbai-embed-large-v1) | `gguf/mxbai-embed-large-v1-f16.gguf` | `b33106f585b9ce46904ad7443a3b52b7a63e231c` |
 | `nomic-bert.gguf` | [nomic-ai/nomic-embed-text-v1.5-GGUF](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF) | `nomic-embed-text-v1.5.Q4_K_M.gguf` | `0188c9bf409793f810680a5a431e7b899c46104c` |
 | `gemma-embedding.gguf` | [ggml-org/embeddinggemma-300M-GGUF](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF) | `embeddinggemma-300M-Q8_0.gguf` | `0f741b5a6585bd53aeb15cd1372c56f2a0f65e12` |
+| `gemma4-iq2xxs.gguf` | [bartowski/google_gemma-4-26B-A4B-it-GGUF](https://huggingface.co/bartowski/google_gemma-4-26B-A4B-it-GGUF) | `google_gemma-4-26B-A4B-it-IQ2_XXS.gguf` | `10f3b41bcf8d3047f4e136e7197ffc2dd1654c9d` |
+| `inkling2-loop.gguf` | [ggml-org/Inkling-2-Mini-GGUF](https://huggingface.co/ggml-org/Inkling-2-Mini-GGUF) | `Inkling-2-Mini-Q8_0.gguf` | `e8a2cecf0e78914f07cc27b9be711a9b2c7561d9` |
+| `inkling2.gguf` | [unsloth/Inkling-2-Mini-GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) | `Inkling-2-Mini-UD-Q4_K_M.gguf` | `800c946d7b9c830c86290df49afbbe91db8455f5` |
+| `mistral-nemo.gguf` | [MaziyarPanahi/Mistral-Nemo-Instruct-2407-GGUF](https://huggingface.co/MaziyarPanahi/Mistral-Nemo-Instruct-2407-GGUF) | `Mistral-Nemo-Instruct-2407.Q4_K_M.gguf` | `eba4e7492de28b8ab2ff44b0bb819004181b3db4` |
