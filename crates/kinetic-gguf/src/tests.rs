@@ -308,3 +308,28 @@ fn written_files_read_back() {
     assert_eq!(&buf[b.offset as usize..], &[2; 20]);
     assert_eq!(g.tensor("a").unwrap().size, 3 * 34);
 }
+
+#[test]
+fn headers_alone_parse_and_garbage_fails_cleanly() {
+    let file = sample().build();
+    let head = &file[..Gguf::parse(&file).unwrap().data_offset as usize];
+    assert!(Gguf::parse(head).is_err());
+    assert_eq!(Gguf::parse_header(head).unwrap().tensors.len(), 2);
+    // only the padding after the last tensor description may be cut
+    for len in 0..head.len() - DEFAULT_ALIGNMENT as usize {
+        assert!(Gguf::parse_header(&head[..len]).is_err(), "accepted {len}");
+    }
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    for _ in 0..20_000 {
+        let mut buf = head.to_vec();
+        for _ in 0..1 + rng.below(4) {
+            mutate(&mut rng, &mut buf);
+        }
+        let Ok(g) = Gguf::parse_header(&buf) else {
+            continue;
+        };
+        for t in &g.tensors {
+            assert_eq!(Some(t.size), t.ty.bytes_for(t.elements()), "{}", t.name);
+        }
+    }
+}
