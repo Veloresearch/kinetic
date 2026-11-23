@@ -5,16 +5,16 @@ exaone4-mtp 90d17887e93ac703
 falcon-h1 864b8c0da968c71c
 gemma-embedding f7dd3dfeff9dda19
 gemma3 4cb10f6f9533c0b6
-gemma4 refused: attention.head_count_kv is not an integer
-gemma4-12b refused: attention.head_count_kv is not an integer
-gemma4-e2b 26fb21030b3a6093
+gemma4 410b0f4e1bab8d1f
+gemma4-12b 94611d5d7f4b820f
+gemma4-e2b 115b0e8498e4de73
 granite 746c57d66d6b65ab
-granitehybrid 2498371919bdf13e
+granitehybrid 7019d86007b2edba
 granitehybrid-dense ca5cfd27d299ff02
-granitemoe a15b3b0b0f2127d7
+granitemoe d3d355f97dbf406f
 hunyuan-dense 74bf12bd8ac7b5f5
 lfm2 519c39934df14e58
-lfm2moe 74a7347ef45bc604
+lfm2moe b820f409f5f22644
 lfm3 96441299ce6416c7
 llama 20a70eab7597d984
 nomic-bert 3cac7769f71a6f86
@@ -22,4 +22,4 @@ olmo2 9b3260f028d107b0
 qwen2 72eac5e26498cca6
 qwen3 e2272e0b9fc8d887
 qwen35 98aa1ef1b6118523
-qwen35moe 9d0889d4f60168e1
+qwen35moe 5162db7babc88441
