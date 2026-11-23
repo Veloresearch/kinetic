@@ -398,14 +398,7 @@ impl Params {
             log_scale: (!windowed).then_some(self.log_scale),
             eps: self.eps,
         };
-        let (gate, up) = l
-            .experts(
-                &t("ffn_gate_up_exps.weight"),
-                d,
-                2 * self.n_ff,
-                self.n_experts,
-            )?
-            .halves();
+        let (gate, up) = super::moe::gate_up(l, i, d, self.n_ff, self.n_experts)?;
         let experts = Moe {
             router: l.matrix(&t("ffn_gate_inp.weight"), d, self.n_experts)?,
             gate,
