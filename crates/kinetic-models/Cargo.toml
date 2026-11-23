@@ -20,6 +20,7 @@ kinetic-vulkan = { path = "../kinetic-vulkan", optional = true }
 rayon.workspace = true
 
 [dev-dependencies]
+kinetic-gguf = { path = "../kinetic-gguf", features = ["testing"] }
 kinetic-tokenizer = { path = "../kinetic-tokenizer" }
 
 [[example]]
