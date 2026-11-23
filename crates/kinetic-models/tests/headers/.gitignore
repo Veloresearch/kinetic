@@ -1,0 +1,2 @@
+# headers without weights, small enough to keep
+!*.gguf
