@@ -30,11 +30,38 @@ pub fn write(
     tensors: &[TensorOut],
     mut data: impl FnMut(usize) -> io::Result<Vec<u8>>,
 ) -> io::Result<()> {
-    let alignment = metadata
-        .iter()
-        .find(|(k, _)| k == "general.alignment")
-        .and_then(|(_, v)| v.as_u64())
-        .unwrap_or(DEFAULT_ALIGNMENT);
+    write_header(out, metadata, tensors)?;
+    let alignment = alignment(metadata);
+    for (i, t) in tensors.iter().enumerate() {
+        let bytes = data(i)?;
+        if bytes.len() as u64 != t.size() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "tensor {} has {} bytes, not {}",
+                    t.name,
+                    bytes.len(),
+                    t.size()
+                ),
+            ));
+        }
+        out.write_all(&bytes)?;
+        let pad = align_up(t.size(), alignment) - t.size();
+        if i + 1 < tensors.len() {
+            out.write_all(&vec![0; pad as usize])?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes what [`write`] writes before the tensor data: the metadata and
+/// where each tensor would lie.
+pub fn write_header(
+    out: &mut impl Write,
+    metadata: &[(String, Value)],
+    tensors: &[TensorOut],
+) -> io::Result<()> {
+    let alignment = alignment(metadata);
     let mut head = Vec::new();
     head.extend_from_slice(MAGIC);
     head.extend_from_slice(&3u32.to_le_bytes());
@@ -57,27 +84,15 @@ pub fn write(
         offset = align_up(offset + t.size(), alignment);
     }
     head.resize(align_up(head.len() as u64, alignment) as usize, 0);
-    out.write_all(&head)?;
-    for (i, t) in tensors.iter().enumerate() {
-        let bytes = data(i)?;
-        if bytes.len() as u64 != t.size() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "tensor {} has {} bytes, not {}",
-                    t.name,
-                    bytes.len(),
-                    t.size()
-                ),
-            ));
-        }
-        out.write_all(&bytes)?;
-        let pad = align_up(t.size(), alignment) - t.size();
-        if i + 1 < tensors.len() {
-            out.write_all(&vec![0; pad as usize])?;
-        }
-    }
-    Ok(())
+    out.write_all(&head)
+}
+
+fn alignment(metadata: &[(String, Value)]) -> u64 {
+    metadata
+        .iter()
+        .find(|(k, _)| k == "general.alignment")
+        .and_then(|(_, v)| v.as_u64())
+        .unwrap_or(DEFAULT_ALIGNMENT)
 }
 
 fn put_str(buf: &mut Vec<u8>, s: &str) {

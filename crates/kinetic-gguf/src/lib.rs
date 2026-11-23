@@ -7,6 +7,8 @@
 mod file_type;
 mod lock;
 mod reader;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod value;
 mod writer;
 
@@ -19,7 +21,7 @@ use memmap2::{Mmap, MmapOptions};
 pub use kinetic_quant::TensorType;
 use reader::Reader;
 pub use value::Value;
-pub use writer::{write, TensorOut};
+pub use writer::{write, write_header, TensorOut};
 
 // the four letters every local model has opened with since 2023
 const MAGIC: &[u8; 4] = b"GGUF";
@@ -96,6 +98,23 @@ pub struct Gguf {
 
 impl Gguf {
     pub fn parse(buf: &[u8]) -> Result<Gguf, Error> {
+        let gguf = Gguf::parse_header(buf)?;
+        if let Some(t) = gguf
+            .tensors
+            .iter()
+            .find(|t| t.offset + t.size > buf.len() as u64)
+        {
+            return Err(Error::Invalid(format!(
+                "tensor {}: data lies outside the file",
+                t.name
+            )));
+        }
+        Ok(gguf)
+    }
+
+    /// [`Gguf::parse`] without asking for the tensor data, for the first
+    /// bytes of a file or a header stored alone.
+    pub fn parse_header(buf: &[u8]) -> Result<Gguf, Error> {
         if buf.len() < 4 || &buf[..4] != MAGIC {
             return Err(Error::NotGguf);
         }
@@ -144,7 +163,6 @@ impl Gguf {
         }
 
         let data_offset = align_up(4 + r.pos() as u64, alignment);
-        let file_len = buf.len() as u64;
         let mut tensors = Vec::with_capacity(raw.len());
         for (name, dims, ty, rel) in raw {
             let invalid = |why: &str| Error::Invalid(format!("tensor {name}: {why}"));
@@ -163,8 +181,8 @@ impl Gguf {
             }
             let offset = data_offset
                 .checked_add(rel)
-                .filter(|o| o.checked_add(size).is_some_and(|end| end <= file_len))
-                .ok_or_else(|| invalid("data lies outside the file"))?;
+                .filter(|o| o.checked_add(size).is_some())
+                .ok_or_else(|| invalid("offset overflows"))?;
             tensors.push(TensorInfo {
                 name,
                 dims,
