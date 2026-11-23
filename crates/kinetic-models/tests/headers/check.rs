@@ -48,9 +48,13 @@ impl Built {
         }
         let types: Vec<String> = self.types.iter().map(|(t, n)| format!("{t} {n}")).collect();
         write!(out, "\n  types: {}", types.join(", ")).unwrap();
+        let unread = match self.structure {
+            Ok(_) => &self.unread_tensors[..],
+            Err(_) => &[],
+        };
         for (what, names) in [
-            ("tensors not read", &self.unread_tensors),
-            ("keys named nowhere", &self.unread_keys),
+            ("tensors not read", unread),
+            ("keys named nowhere", &self.unread_keys[..]),
         ] {
             if !names.is_empty() {
                 write!(out, "\n  {what} ({}): {}", names.len(), names.join(", ")).unwrap();
