@@ -1173,7 +1173,14 @@ fn cuda_backend<'a>(
             Err(_) => break,
         }
     }
-    let gpu = match warm_cache(model, path, runtime, Some("cuda")) {
+    // a split of every layer adds its partial outputs in its own order, so
+    // its states resume only its own runs; a split by layers keeps the bits
+    // of one GPU
+    let device = match runtime.split_mode {
+        SplitMode::Layer => "cuda",
+        SplitMode::Row => "cuda row",
+    };
+    let gpu = match warm_cache(model, path, runtime, Some(device)) {
         Some(w) => gpu.with_warm(w),
         None => gpu,
     };

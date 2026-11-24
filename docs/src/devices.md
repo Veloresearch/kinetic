@@ -214,8 +214,8 @@ partial outputs twice per layer. Both GPUs work on every token, so answers
 and short prompts come about one and a half times as fast as over layers,
 and long prompts about a fifth faster (Qwen3.8 27B on two Tesla P100s); in
 exchange, the hidden state crosses between the GPUs twice per layer rather
-than once or twice per pass, so it gains most where the GPUs have direct
-access to each other.
+than once or twice per pass, so it gains most where the copies between
+them are fast.
 
 ```sh
 kinetic serve model.gguf --gpus 0,1 --split-mode row
@@ -224,7 +224,13 @@ kinetic serve model.gguf --gpus 0,1 --split-mode row
 The partial outputs add up in another order than one GPU's products, so
 answers can differ slightly from those of one GPU or of a split by layers,
 as they would between two kinds of GPU. Batches, rollbacks and Warm Start
-states still change no bit.
+states still change no bit; Warm Start keeps the states of a split by rows
+apart from the others, and receipts record it.
+
+It needs direct access between the two GPUs, as `kinetic doctor` shows it:
+each half writes its partial outputs into the other's memory. Without it,
+such as with `KINETIC_CUDA_P2P=0`, Kinetic says so and does not load the
+model; `--split-mode layer` runs it instead.
 
 It takes exactly two GPUs, and the whole model must fit on them:
 `--gpu-layers` does not apply, and `kinetic fit` does not estimate it yet.

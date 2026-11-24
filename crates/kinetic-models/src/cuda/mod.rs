@@ -334,6 +334,19 @@ struct Output {
     logits: Vec<f32>,
 }
 
+/// Why a split in every layer cannot run over two GPUs without direct
+/// access to each other's memory.
+fn no_peer_access() -> String {
+    let why = match kinetic_cuda::peer_access_allowed() {
+        true => "the driver does not offer it for these GPUs",
+        false => "KINETIC_CUDA_P2P turns it off",
+    };
+    format!(
+        "--split-mode row needs the two GPUs to read and write each other's memory \
+         directly, and {why}; --split-mode layer splits the model by layers instead"
+    )
+}
+
 fn cuda_error(e: kinetic_cuda::Error) -> LoadError {
     match e {
         kinetic_cuda::Error::Unsupported(ty) => LoadError(format!(
@@ -405,6 +418,17 @@ impl<'m> CudaModel<'m> {
                 "a model split in every layer runs wholly on the GPUs; --gpu-layers does not apply"
                     .into(),
             ));
+        }
+        // The halves of a split layer write their partial sums and flags
+        // straight into each other's memory.
+        if tensor {
+            for (g, _) in &others {
+                let both = gpu.ctx.enable_peer_access(&g.ctx).map_err(cuda_error)?
+                    && g.ctx.enable_peer_access(&gpu.ctx).map_err(cuda_error)?;
+                if !both {
+                    return Err(LoadError(no_peer_access()));
+                }
+            }
         }
         let tied = std::ptr::eq(model.output.data, model.embd.data);
         let output = (!tied)
