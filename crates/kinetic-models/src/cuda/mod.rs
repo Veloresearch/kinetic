@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use kinetic_cuda::{
     Batch, Context, Courier, Device, DeviceBuffer, DeviceMatrix, Event, Graph, Kernels, KvType,
-    Mailbox, PinnedBuffer, Stream, MAX_BATCH,
+    Mailbox, PinnedBuffer, Stream, EXCHANGE_BLOCKS, MAX_BATCH,
 };
 
 use crate::blocks::{Folding, Moe};
@@ -430,6 +430,10 @@ impl<'m> CudaModel<'m> {
                 }
             }
         }
+        let one_device = tensor
+            && others
+                .iter()
+                .any(|(g, _)| g.ctx.device() == gpu.ctx.device());
         let tied = std::ptr::eq(model.output.data, model.embd.data);
         let output = (!tied)
             .then(|| gpu.matrix(&model.output))
@@ -590,7 +594,10 @@ impl<'m> CudaModel<'m> {
             planned: RefCell::new(None),
             overlap: None,
             shared_step: RefCell::new(None),
-            eager: placement.eager,
+            // Both halves of a split on one device exchange through the copy
+            // engines, which graphs cannot hold across their streams; see
+            // [`CudaModel::one_device`].
+            eager: placement.eager || one_device,
             unrecorded: Cell::new(false),
             staging: RefCell::new(None),
         };
@@ -818,19 +825,19 @@ impl<'m> CudaModel<'m> {
                 self.folded,
             )?;
             if self.tensor {
-                let blocks = self.exchange_blocks();
-                w.scratch.mailbox = Some(Mailbox::new(&shard.gpu.ctx, rows * d, blocks)?);
-                if blocks > 1 {
-                    w.scratch.courier = Some(Courier::new(&shard.gpu.ctx, rows * d)?);
+                w.scratch.courier = Some(Courier::new(&shard.gpu.ctx, rows * d)?);
+                if !self.one_device() {
+                    let mailbox = Mailbox::new(&shard.gpu.ctx, rows * d, EXCHANGE_BLOCKS)?;
+                    w.scratch.mailbox = Some(mailbox);
                 }
             }
             work.shards.push(w);
         }
         if self.tensor {
-            let blocks = self.exchange_blocks();
-            work.scratch.mailbox = Some(Mailbox::new(&self.gpu.ctx, rows * d, blocks)?);
-            if blocks > 1 {
-                work.scratch.courier = Some(Courier::new(&self.gpu.ctx, rows * d)?);
+            work.scratch.courier = Some(Courier::new(&self.gpu.ctx, rows * d)?);
+            if !self.one_device() {
+                let mailbox = Mailbox::new(&self.gpu.ctx, rows * d, EXCHANGE_BLOCKS)?;
+                work.scratch.mailbox = Some(mailbox);
             }
         }
         if self.host.grid_rope {

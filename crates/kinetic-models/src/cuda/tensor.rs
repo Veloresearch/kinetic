@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
-use kinetic_cuda::{Courier, DeviceBuffer, DeviceMatrix, Exchange, Flow, Graph, EXCHANGE_BLOCKS};
+use kinetic_cuda::{Courier, DeviceBuffer, DeviceMatrix, Exchange, Flow, Graph};
 use kinetic_quant::Matrix;
 
 use super::layer::CudaLayer;
@@ -181,18 +181,20 @@ pub(super) fn part_of(whole: &[f32], held: &Held) -> Vec<f32> {
 }
 
 impl CudaModel<'_> {
-    /// Blocks each exchange runs on: one when both parts share a device, so
-    /// that a waiting exchange leaves room for the other part's kernels.
-    pub(super) fn exchange_blocks(&self) -> usize {
-        let same = self
-            .shards
-            .iter()
-            .any(|s| s.gpu.ctx.device() == self.gpu.ctx.device());
-        if same {
-            1
-        } else {
-            EXCHANGE_BLOCKS
-        }
+    /// Whether both parts of every layer are on one device, which only
+    /// tests and machines with a single GPU ask for. An exchange by kernels
+    /// waits on the device for the other part's work, which only distinct
+    /// devices are sure to run meanwhile: on one, the other part's kernels
+    /// can be queued behind the waiting one, in the same hardware queue or
+    /// behind a call that waits for the whole device, such as freeing
+    /// memory, and the pass never ends. So there every exchange goes
+    /// through the copy engines, ordered by events, and no step is recorded.
+    pub(super) fn one_device(&self) -> bool {
+        self.tensor
+            && self
+                .shards
+                .iter()
+                .any(|s| s.gpu.ctx.device() == self.gpu.ctx.device())
     }
 
     /// The buffers and streams of a second pass in flight, when every layer
@@ -200,7 +202,7 @@ impl CudaModel<'_> {
     pub(super) fn new_overlap(&self, one_pass: bool) -> kinetic_cuda::Result<Option<Overlap>> {
         // prototype: KINETIC_ONE_PASS=1 turns it off for comparisons
         let off = one_pass || std::env::var("KINETIC_ONE_PASS").is_ok_and(|v| v == "1");
-        if !self.tensor || self.exchange_blocks() == 1 || off {
+        if !self.tensor || self.one_device() || off {
             return Ok(None);
         }
         let work = self.new_work(self.batch_rows())?;
@@ -560,7 +562,7 @@ fn give(
     match carry {
         Carry::Kernel => {
             let (Some(own), Some(other)) = (&s.mailbox, &peer.scratch.mailbox) else {
-                unreachable!("works split by tensors have mailboxes")
+                unreachable!("works split over distinct devices have mailboxes")
             };
             gpu.kernels.exchange(y, own, other, how, len, &gpu.stream)
         }
@@ -596,6 +598,6 @@ fn take(
 fn couriers<'a>(own: Option<&'a Courier>, peer: &'a Work) -> (&'a Courier, &'a Courier) {
     match (own, peer.scratch.courier.as_ref()) {
         (Some(own), Some(other)) => (own, other),
-        _ => unreachable!("works over distinct devices have couriers"),
+        _ => unreachable!("works split by tensors have couriers"),
     }
 }
