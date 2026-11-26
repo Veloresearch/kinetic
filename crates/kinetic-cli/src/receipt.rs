@@ -157,6 +157,8 @@ fn rerun_runtime(
         mlock: false,
         no_mmap: false,
         chat_template_file: None,
+        // drafts never change the tokens, and the replay drafts nothing
+        model_draft: None,
         lora: Vec::new(),
         lora_scaled: Vec::new(),
         off: OffArg { off },

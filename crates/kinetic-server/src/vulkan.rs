@@ -25,7 +25,7 @@ use crate::sequence::{self, Run, Sequence, PREFILL_CHUNK};
 pub struct VulkanBackend<'a> {
     gpu: VulkanModel<'a>,
     model: &'a Model<'a>,
-    decoder: Decoder<Ensemble<Source<VulkanModel<'a>>>>,
+    decoder: Decoder<Ensemble<Source<'a, VulkanModel<'a>>>>,
     cached: Option<Sequence<VulkanState>>,
     /// Whether `cached` ends with tokens a reply ran as decode steps.
     replied: bool,

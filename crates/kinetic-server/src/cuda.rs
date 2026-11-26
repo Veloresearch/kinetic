@@ -5,10 +5,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use kinetic_cuda::MAX_BATCH;
-use kinetic_models::cuda::{CudaModel, CudaRunner, CudaState, Placement, PREFILL_GRID};
-use kinetic_models::speculative::{Decoder, Ensemble, Policy};
+use kinetic_models::cuda::{
+    CudaDspark, CudaDsparkDrafter, CudaModel, CudaRunner, CudaState, Placement, PREFILL_GRID,
+};
+use kinetic_models::speculative::{Decoder, Draft, Drafter, Ensemble, Policy, Target};
 use kinetic_models::warm::{Runner, Warm};
-use kinetic_models::{LoadError, Model, State};
+use kinetic_models::{FusedDspark, LoadError, Model, State};
 
 use crate::backend::{image_inputs, Backend, Job, PromptImage, Timings};
 use crate::cpu::CpuBackend;
@@ -25,7 +27,7 @@ use crate::sequence::{self, Run, Sequence};
 pub struct CudaBackend<'a> {
     gpu: Arc<CudaModel<'a>>,
     model: &'a Model<'a>,
-    decoder: Decoder<Ensemble<Source<CudaModel<'a>>>>,
+    decoder: Decoder<Ensemble<Source<'a, CudaModel<'a>>>>,
     cached: Option<Sequence<CudaState>>,
     /// The length `cached` had when it began to run ahead of a request.
     ahead: Option<usize>,
@@ -38,6 +40,8 @@ pub struct CudaBackend<'a> {
     device: String,
     /// Most draft tokens per step when the device runs only this request.
     max_draft: usize,
+    /// A drafter on the device that each slot drafts with too.
+    dspark: Option<Arc<CudaDspark<'a>>>,
 }
 
 /// A prompt's state to keep in the warm cache once the reply is out.
@@ -57,6 +61,35 @@ struct Keep {
 // those resources or their `Rc` counts at once. Each driver call makes the
 // context current on the calling thread first.
 unsafe impl Send for CudaBackend<'_> {}
+
+/// A drafter on the device, which the backend that owns it drives only
+/// while it holds a seat of the model.
+struct Seated<D>(D);
+
+// SAFETY: as for `CudaBackend`, whose decoder owns this drafter: its device
+// resources, and the `Rc` to the context in them, are touched only from
+// `generate`, while the backend holds a seat, which lets one thread at a
+// time drive the device. The drafter's weights, which the slots share
+// through an `Arc`, are only read on the device.
+unsafe impl<D> Send for Seated<D> {}
+
+impl<M: Target, D: Drafter<M>> Drafter<M> for Seated<D> {
+    fn observe(&mut self, model: &M, tokens: &[u32], hidden: &[f32]) {
+        self.0.observe(model, tokens, hidden);
+    }
+
+    fn propose(&mut self, model: &M, context: &[u32], limit: usize) -> Vec<u32> {
+        self.0.propose(model, context, limit)
+    }
+
+    fn propose_tree(&mut self, model: &M, context: &[u32], limit: usize) -> Draft {
+        self.0.propose_tree(model, context, limit)
+    }
+
+    fn reset(&mut self, model: &M) {
+        self.0.reset(model);
+    }
+}
 
 /// Device memory a slot must leave free; every buffer is made up front, so
 /// this only covers recorded passes and the driver.
@@ -133,7 +166,39 @@ impl<'a> CudaBackend<'a> {
             model,
             device,
             gpu,
+            dspark: None,
         })
+    }
+
+    /// Uploads `dspark` and lets it compete with the
+    /// drafts of [`CudaBackend::new`], here and in the slots made after.
+    /// Call it before the first request and before
+    /// [`CudaBackend::without_drafts`]. Fails when the model cannot return
+    /// the hidden states the drafter reads.
+    pub fn with_dspark(mut self, dspark: FusedDspark<'a>) -> Result<Self, LoadError> {
+        let gpu = Arc::clone(&self.gpu);
+        let _seat = gpu.seat();
+        let dspark = gpu.upload_dspark(dspark)?;
+        gpu.set_taps(dspark.taps(self.model.n_layers()))?;
+        // shared by the slots, see the SAFETY note on Send
+        #[allow(clippy::arc_with_non_send_sync)]
+        let dspark = Arc::new(dspark);
+        self.decoder = self.dspark_decoder(&dspark)?;
+        self.max_draft = self.decoder.max_draft;
+        self.dspark = Some(dspark);
+        Ok(self)
+    }
+
+    fn dspark_decoder(
+        &self,
+        dspark: &Arc<CudaDspark<'a>>,
+    ) -> Result<Decoder<Ensemble<Source<'a, CudaModel<'a>>>>, LoadError> {
+        let mut drafter =
+            CudaDsparkDrafter::new(&self.gpu, Arc::clone(dspark), self.model.n_layers())?;
+        // the backend's own lookup source covers what it would copy
+        drafter.lookup = None;
+        let drafter = Box::new(Seated(drafter));
+        Ok(drafter::decoder_with(&*self.gpu, Some(drafter)))
     }
 
     /// [`CudaBackend::new`] that never drafts, so every token costs one
@@ -189,7 +254,10 @@ impl<'a> CudaBackend<'a> {
                 free >> 20
             )));
         }
-        let mut decoder = drafter::decoder(&*self.gpu);
+        let mut decoder = match &self.dspark {
+            Some(d) => self.dspark_decoder(d)?,
+            None => drafter::decoder(&*self.gpu),
+        };
         decoder.max_draft = self.max_draft;
         Ok(CudaBackend {
             gpu: Arc::clone(&self.gpu),
@@ -208,6 +276,7 @@ impl<'a> CudaBackend<'a> {
             max_draft: self.max_draft,
             ahead: None,
             unsettled: None,
+            dspark: self.dspark.clone(),
         })
     }
 

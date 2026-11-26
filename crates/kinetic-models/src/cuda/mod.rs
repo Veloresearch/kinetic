@@ -19,6 +19,7 @@
 
 mod attention;
 mod delta_net;
+mod dspark;
 mod experts;
 mod ffn;
 mod fold;
@@ -59,6 +60,7 @@ use per_layer::{CudaLayerInput, CudaPerLayer};
 use scratch::{Scratch, Spare, Work};
 use staging::Staging;
 
+pub use dspark::{CudaDspark, CudaDsparkDrafter, CudaDsparkState};
 pub use experts::{Plan, PoolPlan, Stats};
 pub use host::CudaRunner;
 pub use lanes::{Ran, Run};
@@ -215,6 +217,18 @@ pub struct CudaModel<'m> {
     /// Where the hidden rows of prompt passes over several devices go on
     /// their way to the host; made by the first such pass.
     staging: RefCell<Option<Staging>>,
+    /// The layers whose inputs every run returns besides the final hidden
+    /// state, and the rows of a pass of them on the device; see
+    /// [`CudaModel::set_taps`].
+    taps: RefCell<Taps>,
+}
+
+/// The layer inputs runs copy out, a pass at a time.
+#[derive(Default)]
+struct Taps {
+    layers: Vec<usize>,
+    /// `rows` rows of each tapped layer in turn.
+    rows: Option<DeviceBuffer<f32>>,
 }
 
 /// The token embedding table: on the device, or, in a model whose device
@@ -275,6 +289,8 @@ struct Output {
     hidden: Vec<f32>,
     /// Logits of each row given to the head, when asked for.
     logits: Vec<f32>,
+    /// The inputs of the tapped layers at every token, the layers in turn.
+    taps: Vec<f32>,
 }
 
 fn cuda_error(e: kinetic_cuda::Error) -> LoadError {
@@ -461,6 +477,7 @@ impl<'m> CudaModel<'m> {
             eager: placement.eager,
             unrecorded: Cell::new(false),
             staging: RefCell::new(None),
+            taps: RefCell::default(),
         };
         if let Some(moes) = moes {
             cuda.offload = Some(RefCell::new(cuda.plan_offload(moes)?));
@@ -775,6 +792,28 @@ impl<'m> CudaModel<'m> {
         all_rows: bool,
         logits: bool,
     ) -> kinetic_cuda::Result<Output> {
+        let mut out = self.forward_spare(state, tokens, all_rows, logits)?;
+        let tapped = self.taps.borrow().layers.len();
+        if tapped > 0 {
+            let d = self.n_embd;
+            out.hidden = out
+                .hidden
+                .chunks_exact(d)
+                .zip(out.taps.chunks_exact(tapped * d))
+                .flat_map(|(h, t)| h.iter().chain(t))
+                .copied()
+                .collect();
+        }
+        Ok(out)
+    }
+
+    fn forward_spare(
+        &self,
+        state: &mut CudaState,
+        tokens: &[u32],
+        all_rows: bool,
+        logits: bool,
+    ) -> kinetic_cuda::Result<Output> {
         let Some(spare) = self.spare.as_ref().filter(|_| tokens.len() > MAX_BATCH) else {
             return self.forward_rows(state, tokens, all_rows, logits);
         };
@@ -813,10 +852,13 @@ impl<'m> CudaModel<'m> {
         }
 
         let d = self.n_embd;
+        // queue_run copies into the tap buffer, so it is borrowed briefly
+        let tapped = self.taps.borrow().layers.len();
         let mut out = Output {
             greedy: Vec::new(),
             hidden: vec![0.0; tokens.len() * d],
             logits: Vec::new(),
+            taps: vec![0.0; tokens.len() * tapped * d],
         };
         if self.routes_on_host() && since.is_none() && !all_rows && tokens.len() > MAX_BATCH {
             self.forward_passes(state, tokens, logits, &mut out)?;
@@ -923,6 +965,16 @@ impl<'m> CudaModel<'m> {
                 }
                 let hidden = &mut out.hidden[done * d..][..n * d];
                 state.work.scratch.h.values().copy_range_to(0, hidden)?;
+            }
+            if let Some(buffer) = &self.taps.borrow().rows {
+                let rows = buffer.len() / (tapped * d);
+                let mut layer = vec![0.0; n * d];
+                for j in 0..tapped {
+                    buffer.copy_range_to(j * rows * d, &mut layer)?;
+                    for (r, row) in layer.chunks_exact(d).enumerate() {
+                        out.taps[((done + r) * tapped + j) * d..][..d].copy_from_slice(row);
+                    }
+                }
             }
             state.pos += n;
             done += n;
@@ -1172,7 +1224,19 @@ impl<'m> CudaModel<'m> {
         let s = &mut work.scratch;
         let mut offload = self.offload.as_ref().map(RefCell::borrow_mut);
         let mut moe_layer = 0;
+        // only the main device's layers are tapped; set_taps refuses shards
+        let mut taps = self.taps.borrow_mut();
+        let main = std::ptr::eq(layers.as_ptr(), self.layers.as_ptr());
+        let tapped = taps.layers.clone();
+        let n = work.batch.len();
         for (i, layer) in layers.iter().enumerate() {
+            if let (true, Some(buffer)) = (main, taps.rows.as_mut()) {
+                let rows = buffer.len() / (tapped.len() * self.n_embd);
+                for j in (0..tapped.len()).filter(|&j| tapped[j] == i) {
+                    let at = j * rows * self.n_embd;
+                    buffer.copy_from_device(at, &s.x, 0..n * self.n_embd, &gpu.stream)?;
+                }
+            }
             let next = match layers.get(i + 1) {
                 Some(l) => l.mixer_norm.as_ref(),
                 None => last,
@@ -1224,6 +1288,46 @@ impl<'m> CudaModel<'m> {
             .iter()
             .zip(&work.layers)
             .chain(shards.flat_map(|(sh, w)| sh.layers.iter().zip(&w.layers)))
+    }
+
+    /// Makes every run return, after each token's normalized final hidden
+    /// state, the inputs of `layers` at that token, as
+    /// [`Model::set_taps`] does; a drafter reads them. Call it before the
+    /// first run of any state. Runs no longer share passes then. Fails on
+    /// a model over several devices, with layers on the host or with routed
+    /// experts.
+    pub fn set_taps(&self, layers: Vec<usize>) -> Result<(), LoadError> {
+        if self.mtp.is_some() && !layers.is_empty() {
+            return Err(LoadError(
+                "a model with its own prediction block drafts with it, not a drafter".into(),
+            ));
+        }
+        if !self.shards.is_empty() || self.front > 0 || self.offload.is_some() {
+            return Err(LoadError(
+                "a drafter on CUDA needs every layer of the model on one GPU".into(),
+            ));
+        }
+        if let Some(l) = layers.iter().find(|&&l| l >= self.layers.len()) {
+            return Err(LoadError(format!("layer {l} is not a layer of the model")));
+        }
+        let rows = self.batch_rows().max(MAX_BATCH);
+        let buffer = match layers.is_empty() {
+            true => None,
+            false => Some(
+                DeviceBuffer::new(&self.gpu.ctx, rows * layers.len() * self.n_embd)
+                    .map_err(cuda_error)?,
+            ),
+        };
+        *self.taps.borrow_mut() = Taps {
+            layers,
+            rows: buffer,
+        };
+        Ok(())
+    }
+
+    /// The layers whose inputs runs return; see [`CudaModel::set_taps`].
+    pub fn taps(&self) -> Vec<usize> {
+        self.taps.borrow().layers.clone()
     }
 
     /// Layers on each device in turn, the main one first; one entry when

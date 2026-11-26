@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use kinetic_models::speculative::{Decoder, Ensemble, Policy};
+use kinetic_models::speculative::{Decoder, Drafter, Ensemble, Policy};
 use kinetic_models::warm::Warm;
 use kinetic_models::{Model, State};
 
@@ -19,7 +19,7 @@ use crate::sequence::{self, Run, Sequence, PREFILL_CHUNK, PREFILL_GRID};
 /// an earlier one left behind.
 pub struct CpuBackend<'a> {
     model: &'a Model<'a>,
-    decoder: Decoder<Ensemble<Source<Model<'a>>>>,
+    decoder: Decoder<Ensemble<Source<'a, Model<'a>>>>,
     cached: Option<Sequence<State>>,
     /// The length `cached` had when it began to run ahead of a request.
     ahead: Option<usize>,
@@ -49,6 +49,13 @@ impl<'a> CpuBackend<'a> {
     /// as benchmarks want.
     pub fn plain(model: &'a Model<'a>) -> Self {
         CpuBackend::new(model).without_drafts()
+    }
+
+    /// Lets `extra`, such as a DSpark drafter, compete with the drafts of
+    /// [`CpuBackend::new`]. Call it before [`CpuBackend::without_drafts`].
+    pub fn with_drafter(mut self, extra: Box<dyn Drafter<Model<'a>> + Send + 'a>) -> Self {
+        self.decoder = drafter::decoder_with(self.model, Some(extra));
+        self
     }
 
     /// Turns RAD-1 off: every token costs one forward pass.

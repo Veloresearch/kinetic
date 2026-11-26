@@ -24,6 +24,10 @@ kinetic-gguf = { path = "../kinetic-gguf", features = ["testing"] }
 kinetic-tokenizer = { path = "../kinetic-tokenizer" }
 
 [[example]]
+name = "cuda_dspark"
+required-features = ["cuda"]
+
+[[example]]
 name = "cuda_parity"
 required-features = ["cuda"]
 

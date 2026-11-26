@@ -123,6 +123,7 @@ seeded answer is the same for the same seed.
 | `--mlock` | keep the model in RAM, so the system never swaps it out (GGUF files) |
 | `--no-mmap` | read the model into memory instead of mapping the file (GGUF files) |
 | `--chat-template-file <FILE>` | Jinja chat template to use instead of the model's own |
+| `--model-draft <FILE>` | A DSpark drafter in GGUF, such as one of the `*-DSpark-GGUF` files made for llama.cpp, to draft with next to RAD-1's own sources, on the CPU or on one CUDA GPU |
 | `--lora <FILE>[,<FILE>...]` | LoRA adapters in llama.cpp's GGUF format, merged into the weights at load |
 | `--lora-scaled <FILE>:<SCALE>[,...]` | the same with scales; `--lora-scaled FILE SCALE`, as older llama.cpp builds took it, works too |
 

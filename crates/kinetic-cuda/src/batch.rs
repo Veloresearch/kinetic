@@ -25,6 +25,9 @@ pub struct Batch {
     /// How far text positions trail cache positions after images, when the
     /// batch carries grid positions.
     grid_shift: Option<usize>,
+    /// Whether every token attends to the whole batch, not only to the
+    /// tokens up to its own.
+    block: bool,
 }
 
 impl Batch {
@@ -38,7 +41,20 @@ impl Batch {
             host: vec![0],
             capacity,
             grid_shift: None,
+            block: false,
         })
+    }
+
+    /// Makes attention over later batches see the whole batch from every
+    /// token, as the block of a DFlash or DSpark draft does; positions and
+    /// windows stay each token's own. Batches of at most [`MAX_BATCH`].
+    pub fn set_block(&mut self, block: bool) {
+        self.block = block;
+    }
+
+    /// See [`Batch::set_block`].
+    pub fn block(&self) -> bool {
+        self.block
     }
 
     /// Makes every later batch carry grid positions; text tokens get their

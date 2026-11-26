@@ -4,6 +4,7 @@
 
 pub(crate) mod bert;
 pub(crate) mod dspark;
+pub(crate) mod dspark_fused;
 pub(crate) mod falcon_h1;
 pub(crate) mod gemma4;
 pub(crate) mod gemma_embedding;

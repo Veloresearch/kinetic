@@ -113,8 +113,14 @@ impl AttentionShape {
 
     /// Chunks a token may attend over in a cache of `slots` entries.
     fn max_chunks(&self, slots: usize) -> usize {
+        self.max_chunks_ahead(slots, 0)
+    }
+
+    /// [`AttentionShape::max_chunks`] for a token that also sees `ahead`
+    /// positions after its own.
+    fn max_chunks_ahead(&self, slots: usize, ahead: usize) -> usize {
         match self.window {
-            Some(w) => (w - 1) / CHUNK + 2,
+            Some(w) => (w - 1 + ahead) / CHUNK + 2,
             None => slots.div_ceil(CHUNK),
         }
     }
@@ -385,6 +391,7 @@ struct AttnArgs {
     v_scale: u64,
     grid: u64,
     v_norm: u32,
+    see_end: u32,
 }
 
 fn ptr(buf: Option<&DeviceBuffer<f32>>) -> u64 {
@@ -508,20 +515,28 @@ impl Kernels {
                 )));
             }
         }
+        // a draft block: every token sees the whole batch
+        let block = batch.block();
+        if block && n > MAX_BATCH {
+            return Err(Error::Shape(format!(
+                "a block of {n} tokens sees itself whole; at most {MAX_BATCH} do"
+            )));
+        }
+        let ahead = if block { n - 1 } else { 0 };
         let flash = n > MAX_BATCH && self.attn_flash.is_some();
         let tile = (n > MAX_BATCH && TILE_HEADS.contains(&hd))
             .then_some(self.attn_tile.as_ref())
             .flatten();
         let stored_heads = if params.store { s.n_head_kv as u32 } else { 0 };
+        let max_chunks = s.max_chunks_ahead(cache.slots, ahead);
         if !flash && tile.is_none() {
             io.scratch.check_holds(
-                s.scratch_len(n.min(MAX_BATCH), cache.slots),
+                n.min(MAX_BATCH) * s.n_head * max_chunks * (hd + 2),
                 "attention scratch",
             )?;
         }
         io.out.check_rows(n)?;
 
-        let max_chunks = s.max_chunks(cache.slots);
         let ((k_cache, k_scale), (v_cache, v_scale)) = (cache.k.ptrs(), cache.v.ptrs());
         let mut args = AttnArgs {
             batch: batch.device_ptr(),
@@ -561,6 +576,7 @@ impl Kernels {
             v_scale,
             grid: batch.grid_ptr(),
             v_norm: s.v_norm.into(),
+            see_end: if block { (batch.pos() + n) as u32 } else { 0 },
         };
         let (n, heads) = (n as u32, s.n_head as u32);
         let grid = |grid: [u32; 3], threads: u32| LaunchConfig {

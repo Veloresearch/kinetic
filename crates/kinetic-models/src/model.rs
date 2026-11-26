@@ -275,6 +275,11 @@ impl Model<'_> {
         self.taps = visits;
     }
 
+    /// The layer visits [`Model::set_taps`] asked for.
+    pub fn taps(&self) -> &[usize] {
+        &self.taps
+    }
+
     /// Reads the routed experts of a mixture-of-experts model into memory,
     /// which later tokens would otherwise fault in page by page, when the
     /// system has room for them and 3 GiB more. Best done after anything
@@ -779,6 +784,12 @@ impl Model<'_> {
             .mixer
             .rollback(&mut state.cache, &Vec::from_iter(0..keep));
         state.len -= fed - keep;
+    }
+
+    /// The rows of the input embedding table for `tokens`, with the
+    /// model's embedding scale.
+    pub fn embeddings(&self, tokens: &[u32]) -> Vec<f32> {
+        self.embed(tokens)
     }
 
     /// The embeddings of `tokens` as the first layer reads them.

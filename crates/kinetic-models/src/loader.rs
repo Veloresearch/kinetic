@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 use kinetic_gguf::{Gguf, TensorInfo, TensorSource, Value};
-use kinetic_quant::{dequantize, Matrix};
+use kinetic_quant::{dequantize, Matrix, TensorType};
 
 use crate::blocks::{Activation, Experts, SwiGlu};
 use crate::LoadError;
@@ -165,6 +165,39 @@ impl<'a> Loader<'a> {
         dequantize(t.ty, self.file.tensor_data(t), &mut out)
             .map_err(|e| LoadError(format!("{name}: {e}")))?;
         Ok(out)
+    }
+
+    /// A tensor of `len` integer indices stored as I32 or I64, each checked
+    /// to be below `bound`.
+    pub fn indices(&self, name: &str, len: usize, bound: usize) -> Result<Vec<u32>, LoadError> {
+        let t = self.tensor(name)?;
+        if t.elements() != len as u64 {
+            return Err(LoadError(format!(
+                "{name} has {} values, expected {len}",
+                t.elements()
+            )));
+        }
+        let data = self.file.tensor_data(t);
+        let values: Vec<i64> = match t.ty {
+            TensorType::I32 => data
+                .chunks_exact(4)
+                .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as i64)
+                .collect(),
+            TensorType::I64 => data
+                .chunks_exact(8)
+                .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+                .collect(),
+            ty => return Err(LoadError(format!("{name} is {ty:?}, expected I32 or I64"))),
+        };
+        values
+            .into_iter()
+            .map(|v| {
+                u32::try_from(v)
+                    .ok()
+                    .filter(|&v| (v as usize) < bound)
+                    .ok_or_else(|| LoadError(format!("{name} holds {v}, out of range")))
+            })
+            .collect()
     }
 
     /// [`Loader::vector`] for a tensor the file may leave out.

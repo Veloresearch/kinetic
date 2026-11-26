@@ -148,6 +148,7 @@ impl CudaModel<'_> {
         let state = &*run.state;
         let since = state.checkpoint.map_or(0, |start| state.pos - start);
         self.offload.is_none()
+            && self.taps.borrow().layers.is_empty()
             && self.front == 0
             && self.shards.is_empty()
             && self.layers.iter().all(|l| l.mixer.widths().is_some())
@@ -259,6 +260,7 @@ impl CudaModel<'_> {
             greedy: Vec::new(),
             hidden: Vec::new(),
             logits: Vec::new(),
+            taps: Vec::new(),
         };
         if rows == total {
             self.read_head(s, total, logits, &mut head)?;

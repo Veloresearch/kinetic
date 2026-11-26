@@ -46,7 +46,7 @@ mod tests;
 pub use companion::{find_companion, load_companion, Companion, CompanionDrafter};
 pub use draft::Draft;
 pub use dry::dry_breakers;
-pub use dspark::DsparkCompanion;
+pub use dspark::{DsparkCompanion, FusedDsparkCompanion};
 pub use ensemble::Ensemble;
 pub use logprobs::{Logprobs, TokenLogprob};
 pub use lookup::Lookup;

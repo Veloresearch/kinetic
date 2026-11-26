@@ -18,6 +18,7 @@ const RENAMED: &[(&str, &str)] = &[
     ("-hf", "--hf-repo"),
     ("-hfr", "--hf-repo"),
     ("-hff", "--hf-file"),
+    ("-md", "--model-draft"),
 ];
 
 /// llama.cpp's spellings of how many layers go to the GPU: zero means the
@@ -94,15 +95,8 @@ const UNSUPPORTED: &[(&[&str], &str)] = &[
         "built-in template names are not supported; pass a Jinja file with --chat-template-file",
     ),
     (
-        &[
-            "-md",
-            "--model-draft",
-            "--draft",
-            "--draft-max",
-            "--draft-min",
-            "-ngld",
-        ],
-        "speculative decoding is automatic and needs no draft model",
+        &["--draft", "--draft-max", "--draft-min", "-ngld"],
+        "speculative decoding is automatic: drafts grow and shrink with how well they do; a DSpark drafter goes in with --model-draft",
     ),
     (
         &["-mu", "--model-url"],

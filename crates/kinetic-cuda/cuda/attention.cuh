@@ -67,6 +67,9 @@ struct AttnArgs {
     const unsigned* grid;
     // RMS-normalizes each value head, without weights.
     unsigned v_norm;
+    // One past the last position of the batch when every query sees the
+    // whole batch, as a draft block does; 0 for causal attention.
+    unsigned see_end;
 };
 
 __device__ __forceinline__ unsigned attn_slot(const AttnArgs& a, unsigned pos) {
@@ -77,6 +80,11 @@ __device__ __forceinline__ unsigned attn_slot(const AttnArgs& a, unsigned pos) {
 // them, and the kernels do nothing for positions that would.
 __device__ __forceinline__ bool attn_fits(const AttnArgs& a, unsigned pos) {
     return a.window || pos < a.slots;
+}
+
+// The last position a query at `pos` attends to.
+__device__ __forceinline__ unsigned attn_end(const AttnArgs& a, unsigned pos) {
+    return a.see_end ? max(pos, a.see_end - 1) : pos;
 }
 
 __device__ __forceinline__ unsigned attn_start(const AttnArgs& a, unsigned pos) {
@@ -221,7 +229,7 @@ __device__ __forceinline__ void attn_chunk_one(const AttnArgs& a, unsigned t, un
     const unsigned pos = a.batch[0] + t;
     const unsigned start = attn_start(a, pos);
     const unsigned chunk = start / ATTN_CHUNK + c;
-    const unsigned lo = max(chunk * ATTN_CHUNK, start), hi = min(chunk * ATTN_CHUNK + ATTN_CHUNK, pos + 1);
+    const unsigned lo = max(chunk * ATTN_CHUNK, start), hi = min(chunk * ATTN_CHUNK + ATTN_CHUNK, attn_end(a, pos) + 1);
 
     const unsigned lane = threadIdx.x % WARP;
     const unsigned kv_dim = a.n_head_kv * HD;
@@ -324,7 +332,7 @@ __device__ __forceinline__ void attn_chunk_impl(const AttnArgs& a) {
     const unsigned t = blockIdx.x / blocks, h0 = blockIdx.x % blocks * G;
     const unsigned pos = a.batch[0] + t;
     if (!attn_fits(a, pos)) return;
-    const unsigned first = attn_start(a, pos) / ATTN_CHUNK, last = pos / ATTN_CHUNK;
+    const unsigned first = attn_start(a, pos) / ATTN_CHUNK, last = attn_end(a, pos) / ATTN_CHUNK;
     for (unsigned c = blockIdx.y * ATTN_WARPS + threadIdx.x / WARP; first + c <= last;
          c += gridDim.y * ATTN_WARPS)
         attn_chunk_one<E, G, QK, QV>(a, t, h0, c);
@@ -367,7 +375,7 @@ extern "C" __global__ void attn_combine(AttnArgs a) {
     const unsigned pos = a.batch[0] + t;
     if (!attn_fits(a, pos)) return;
     const unsigned first = attn_start(a, pos) / ATTN_CHUNK;
-    const unsigned chunks = pos / ATTN_CHUNK - first + 1;
+    const unsigned chunks = attn_end(a, pos) / ATTN_CHUNK - first + 1;
     const float* p = a.partial + static_cast<size_t>(th) * a.max_chunks * (hd + 2);
 
     float mx = -CUDART_INF_F;

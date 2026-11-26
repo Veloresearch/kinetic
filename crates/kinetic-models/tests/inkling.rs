@@ -846,3 +846,253 @@ const LOGITS: [f32; 40] = [
     0.460775, 0.9439149, -1.626012, 0.2645262, 0.8612356, -0.3575845, 0.08001616, 0.8101404,
     -1.594792, 0.02124436, 0.5619222, 1.058711, -0.2271008, 0.2041879, 0.8106044, -1.470942,
 ];
+
+/// The tensors of a tiny DSpark drafter in llama.cpp's layout, with a
+/// fusion layer: two layers, the first windowed, a reduced vocabulary of
+/// six tokens mapped by `d2t` and a confidence head. It reads the tiny
+/// model's hidden states at layers 1 and 4 and its final one.
+fn tiny_fused_tensors() -> Vec<(String, Vec<u64>, TensorType)> {
+    let f = TensorType::F32;
+    let mut t = Vec::new();
+    for i in 0..2 {
+        let b = |s: &str| format!("blk.{i}.{s}");
+        t.extend([
+            (b("attn_norm.weight"), vec![D], f),
+            (b("attn_q.weight"), vec![D, 8], f),
+            (b("attn_k.weight"), vec![D, 4], f),
+            (b("attn_v.weight"), vec![D, 4], f),
+            (b("attn_output.weight"), vec![8, D], f),
+            (b("attn_q_norm.weight"), vec![4], f),
+            (b("attn_k_norm.weight"), vec![4], f),
+            (b("ffn_norm.weight"), vec![D], f),
+            (b("ffn_gate.weight"), vec![D, 4], f),
+            (b("ffn_up.weight"), vec![D, 4], f),
+            (b("ffn_down.weight"), vec![4, D], f),
+        ]);
+    }
+    t.extend([
+        ("fc.weight".into(), vec![3 * D, D], f),
+        ("enc.output_norm.weight".into(), vec![D], f),
+        ("output_norm.weight".into(), vec![D], f),
+        ("output.weight".into(), vec![D, 6], f),
+        ("d2t".into(), vec![6], TensorType::I32),
+        ("markov_w1.weight".into(), vec![3, 10], f),
+        ("markov_w2.weight".into(), vec![3, 6], f),
+        ("conf_proj.weight".into(), vec![D + 3], f),
+        ("conf_proj.bias".into(), vec![1], f),
+    ]);
+    t
+}
+
+fn tiny_fused_keys() -> Vec<(&'static str, Value)> {
+    vec![
+        ("block_count", Value::U32(2)),
+        ("embedding_length", Value::U32(D as u32)),
+        ("feed_forward_length", Value::U32(4)),
+        ("attention.head_count", Value::U32(2)),
+        ("attention.head_count_kv", Value::U32(1)),
+        ("attention.key_length", Value::U32(4)),
+        ("attention.value_length", Value::U32(4)),
+        ("attention.layer_norm_rms_epsilon", Value::F32(1e-6)),
+        ("attention.sliding_window", Value::U32(2)),
+        (
+            "attention.sliding_window_pattern",
+            Value::Array(vec![Value::Bool(true), Value::Bool(false)]),
+        ),
+        ("rope.freq_base", Value::F32(10000.0)),
+        ("block_size", Value::U32(4)),
+        (
+            "target_layers",
+            Value::Array(vec![Value::U32(1), Value::U32(4), Value::U32(8)]),
+        ),
+        ("sample_from_anchor", Value::Bool(true)),
+        ("has_confidence_head", Value::Bool(true)),
+    ]
+}
+
+/// The tiny fused drafter with `extra` tensors besides its own.
+fn tiny_fused_drafter(keys: Vec<(&str, Value)>, extra: &[&str]) -> Memory {
+    let mut tensors = tiny_fused_tensors();
+    tensors.extend(
+        extra
+            .iter()
+            .map(|&n| (n.to_string(), vec![D], TensorType::F32)),
+    );
+    let mut metadata = vec![
+        (
+            "general.architecture".to_string(),
+            Value::String("dflash".into()),
+        ),
+        ("tokenizer.ggml.mask_token_id".to_string(), Value::U32(9)),
+    ];
+    metadata.extend(keys.into_iter().map(|(k, v)| (format!("dflash.{k}"), v)));
+    let out: Vec<TensorOut> = tensors
+        .iter()
+        .map(|(name, dims, ty)| TensorOut {
+            name: name.clone(),
+            dims: dims.clone(),
+            ty: *ty,
+        })
+        .collect();
+    let mut bytes = Vec::new();
+    kinetic_gguf::write(&mut bytes, &metadata, &out, |k| {
+        let (name, dims, ty) = &tensors[k];
+        let n = dims.iter().product::<u64>() as usize;
+        Ok(match ty {
+            // draft rows to target tokens, out of order
+            TensorType::I32 => [7i32, 2, 9, 0, 4, 5]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect(),
+            _ => {
+                let shift = if name.contains("norm") { 1.0 } else { 0.0 };
+                (0..n)
+                    .map(|i| (((i * (2 * k + 5)) % 13) as f32 - 6.0) * 0.11 + shift)
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect()
+            }
+        })
+    })
+    .unwrap();
+    Memory {
+        header: Gguf::parse(&bytes).unwrap(),
+        bytes,
+    }
+}
+
+/// llama.cpp's DSpark drafters with a fusion layer load through the guard,
+/// which refuses a file with a part they do not read.
+#[test]
+fn the_fused_drafter_loads_through_the_guard() {
+    use kinetic_models::FusedDspark;
+
+    let file = tiny_fused_drafter(tiny_fused_keys(), &[]);
+    assert!(FusedDspark::detect(&file));
+    assert!(!FusedDspark::detect(&tiny_drafter()));
+    let dspark = FusedDspark::load(&file).unwrap();
+    assert_eq!(dspark.target_layers(), [1, 4, 8]);
+    assert_eq!(dspark.max_draft(), 4);
+    assert_eq!(dspark.vocab(), 10);
+    assert_eq!(dspark.mask_token(), 9);
+
+    let extra = tiny_fused_drafter(tiny_fused_keys(), &["blk.0.attn_sinks.weight"]);
+    let Err(e) = FusedDspark::load(&extra) else {
+        panic!("a file with a part the drafter does not read loaded");
+    };
+    assert!(e.0.contains("blk.0.attn_sinks.weight"), "{e}");
+}
+
+/// Its drafts are tokens of the target's vocabulary, each with a chance,
+/// and the same for the same committed features.
+#[test]
+fn the_fused_drafter_drafts_target_tokens() {
+    let target = tiny_model();
+    let drafter = tiny_fused_drafter(tiny_fused_keys(), &[]);
+    let model = kinetic_models::load(&target).unwrap();
+    let dspark = kinetic_models::FusedDspark::load(&drafter).unwrap();
+    let d = D as usize;
+    let features: Vec<f32> = (0..5 * 3 * d)
+        .map(|i| ((i % 7) as f32 - 3.0) * 0.4)
+        .collect();
+    let mut state = dspark.new_state();
+    dspark.commit(&mut state, &features[..2 * 3 * d]);
+    dspark.commit(&mut state, &features[2 * 3 * d..]);
+    let embed = |t: &[u32]| model.embeddings(t);
+    let no_head = |_: &[f32]| -> Vec<f32> { unreachable!("the drafter has its own head") };
+    let draft = dspark.draft(&state, 3, 4, &embed, &no_head);
+    assert_eq!(draft.len(), 4);
+    for &(token, chance) in &draft {
+        assert!([7, 2, 9, 0, 4, 5].contains(&token), "{token}");
+        assert!((0.0..=1.0).contains(&chance), "{chance}");
+    }
+    let mut again = dspark.new_state();
+    dspark.commit(&mut again, &features);
+    assert_eq!(dspark.draft(&again, 3, 4, &embed, &no_head), draft);
+}
+
+/// Speculative greedy decoding with the fused drafter, including after
+/// the decoder resets and the drafter sees only the tokens after a prefix,
+/// gives plain greedy decoding token for token.
+#[test]
+fn speculative_greedy_with_the_fused_drafter_is_plain_greedy() {
+    use kinetic_models::speculative::{
+        load_companion, CompanionDrafter, Decoder, Greedy, Lookup, Policy,
+    };
+
+    let (target, drafter) = (tiny_model(), tiny_fused_drafter(tiny_fused_keys(), &[]));
+    let prompt = [3, 7, 1, 9, 3, 7];
+    let n = 40;
+    let plain = {
+        let model = kinetic_models::load(&target).unwrap();
+        let mut state = model.new_state();
+        let mut context = prompt.to_vec();
+        let (mut scores, _) = Greedy.score(&model, &mut state, &prompt, false);
+        while context.len() < prompt.len() + n {
+            let t = Greedy.choose(&model, &scores, 0, &context);
+            context.push(t);
+            scores = Greedy.score(&model, &mut state, &[t], false).0;
+        }
+        context
+    };
+    for lookup in [false, true] {
+        let mut model = kinetic_models::load(&target).unwrap();
+        let mut drafter =
+            CompanionDrafter::new(load_companion(&drafter).unwrap(), &mut model).unwrap();
+        drafter.lookup = lookup.then(Lookup::default);
+        let mut decoder = Decoder::new(drafter);
+        decoder.max_pause = 0;
+        let mut state = model.new_state();
+        let mut context = prompt.to_vec();
+        decoder.prefill(&model, &mut Greedy, &mut state, &context, 0);
+        let mut drafted = 0;
+        let mut resumed = false;
+        while context.len() < prompt.len() + n {
+            if !resumed && context.len() >= prompt.len() + n / 2 {
+                // a server resuming from a cached prefix: the drafter sees
+                // only the tokens after it
+                resumed = true;
+                decoder.reset(&model);
+                let mut state2 = model.new_state();
+                let (head, tail) = context.split_at(context.len() - 3);
+                Greedy.score(&model, &mut state2, head, false);
+                decoder.prefill(&model, &mut Greedy, &mut state2, tail, 0);
+                state = state2;
+            }
+            let limit = prompt.len() + n - context.len();
+            let step = decoder.step(&model, &mut Greedy, &mut state, &mut context, limit, |_| {
+                false
+            });
+            drafted += step.drafted;
+        }
+        assert_eq!(context, plain, "lookup {lookup:?}");
+        assert!(drafted > 0, "nothing drafted");
+    }
+}
+
+/// An explicit fused drafter fits a target of its width and is refused by
+/// one of another; it is never picked up beside a model on its own.
+#[test]
+fn an_explicit_fused_drafter_is_checked() {
+    use kinetic_models::speculative::find_companion;
+
+    let folder = std::env::temp_dir().join(format!("kinetic-fused-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    let target = tiny_model();
+    let model = folder.join("tiny.gguf");
+    std::fs::write(&model, &target.bytes).unwrap();
+    let drafter = folder.join("tiny-DSpark-Q8_0.gguf");
+    std::fs::write(&drafter, &tiny_fused_drafter(tiny_fused_keys(), &[]).bytes).unwrap();
+    assert_eq!(find_companion(&model, &target.header, None).unwrap(), None);
+    assert_eq!(
+        find_companion(&model, &target.header, Some(&drafter)).unwrap(),
+        Some(drafter.clone())
+    );
+    let mut keys = tiny_fused_keys();
+    keys.retain(|(k, _)| *k != "embedding_length");
+    keys.push(("embedding_length", Value::U32(16)));
+    let wide = folder.join("wide.gguf");
+    std::fs::write(&wide, &tiny_fused_drafter(keys, &[]).bytes).unwrap();
+    assert!(find_companion(&model, &target.header, Some(&wide)).is_err());
+    std::fs::remove_dir_all(&folder).unwrap();
+}
