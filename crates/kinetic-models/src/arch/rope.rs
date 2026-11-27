@@ -73,13 +73,18 @@ fn resolve(l: &Loader, o: &RopeScaling) -> Result<Resolved, LoadError> {
             }
             None => None,
         };
+    let trained = l.usize_or("context_length", 0)?;
     let stored_factor = match l.header().arch_key("rope.scaling.factor") {
         Some(_) => l.f32("rope.scaling.factor")?,
-        None => l.f32_or("rope.scale_linear", 0.0)?,
+        None => match l.header().arch_key("rope.scale_linear") {
+            Some(_) => l.f32("rope.scale_linear")?,
+            // Ollama's Gemma 3 converter omits the 8x linear factor on 128k models.
+            None if l.header().architecture() == Some("gemma3") && trained >= 131_072 => 8.0,
+            None => 0.0,
+        },
     };
     let factor = o.factor.unwrap_or(stored_factor);
     let kind = o.kind.or(stored_kind).unwrap_or(ScalingKind::Linear);
-    let trained = l.usize_or("context_length", 0)?;
     let original_context = match o.original_context {
         Some(n) => n,
         None => l.usize_or("rope.scaling.original_context_length", trained)?,
