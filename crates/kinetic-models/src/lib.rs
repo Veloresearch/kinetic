@@ -103,7 +103,11 @@ pub(crate) fn build<'a>(
     let l = Loader::new(file);
     let arch = architecture(file)?;
     let d = l.usize("embedding_length")?;
-    let eps = l.f32("attention.layer_norm_rms_epsilon")?;
+    let eps = match arch {
+        // Ollama's Gemma 3 converter omits `attention.layer_norm_rms_epsilon`.
+        "gemma3" | "gemma-embedding" => l.f32_or("attention.layer_norm_rms_epsilon", 1e-6)?,
+        _ => l.f32("attention.layer_norm_rms_epsilon")?,
+    };
     let folds = Folds::read(file.header())?;
     let family = arch::family(arch)
         .ok_or_else(|| LoadError(format!("architecture {arch} is not supported yet")))?;
