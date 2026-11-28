@@ -11,6 +11,7 @@
 #include "delta_scan_f32.cuh"
 #include "depth.cuh"
 #include "embed.cuh"
+#include "exchange.cuh"
 #include "gemm.cuh"
 #include "gemm_float.cuh"
 #include "gemm_pascal.cuh"

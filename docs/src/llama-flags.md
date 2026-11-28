@@ -37,7 +37,7 @@ argument":
 
 ```text
 $ kinetic run model.gguf -ts 1,1 "Hello"
-kinetic: -ts is a llama.cpp flag: Kinetic splits a model by layers only; choose the device with --device, and spread the layers over several CUDA GPUs with --gpus 0,1.
+kinetic: -ts is a llama.cpp flag: Kinetic shares a model out evenly by free memory; choose the device with --device, spread the layers over several CUDA GPUs with --gpus 0,1, and split every layer over two with --split-mode row.
 ```
 
 <!-- The table is generated from crates/kinetic-cli/src/llama_flags.rs by

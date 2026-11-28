@@ -82,6 +82,7 @@ pub struct Kernels {
     pub(crate) add_f32: Function,
     pub(crate) sum_f32: Function,
     pub(crate) to_host: Function,
+    pub(crate) exchange: Function,
     pub(crate) quantize_q8k: Function,
     /// Routed-expert kernels by weight type; see `moe.rs`.
     pub(crate) moe_gate_up: [Function; EXPERT_TYPES.len()],
@@ -233,6 +234,7 @@ impl Kernels {
             add_f32: module.function(c"add_f32")?,
             sum_f32: module.function(c"sum_f32")?,
             to_host: module.function(c"to_host")?,
+            exchange: module.function(c"exchange")?,
             quantize_q8k: module.function(c"quantize_q8k")?,
             moe_gate_up: moe("moe_gate_up")?,
             moe_down: moe("moe_down")?,

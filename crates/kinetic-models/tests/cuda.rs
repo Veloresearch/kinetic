@@ -70,6 +70,52 @@ fn batches_and_rollbacks_change_no_bit() {
         assert!(long_prompt(&spread) == whole_long, "{devices:?}");
     }
 
+    // Every layer split over two devices by heads and rows: the partial
+    // outputs add up in another order, so the results are close, not equal,
+    // but batches, rollbacks and host copies still change no bit.
+    let placement = Placement {
+        devices: vec![0, 0],
+        tensor: true,
+        ..Placement::default()
+    };
+    match CudaModel::load_with(&model, LONG + 8, placement) {
+        Err(e) => eprintln!("not split by tensors: {e}"),
+        Ok(tensor) => {
+            assert_close(&floats(&logits(&tensor)), &floats(&whole), "logits");
+            let (hidden, last) = long_prompt(&tensor);
+            assert_rms_close(&floats(&hidden), &floats(&whole_long.0), "long hidden");
+            assert_close(&floats(&last), &floats(&whole_long.1), "long logits");
+            a_batch_matches_token_by_token(&tensor);
+            rollback_leaves_the_state_as_if_never_run(&tensor);
+            a_host_copy_restores_the_state(&tensor, &model);
+        }
+    }
+
+    // Over two devices, two prompt passes run at once; the results are
+    // those of one pass at a time, bit for bit.
+    if two {
+        let split = |one_pass| {
+            let placement = Placement {
+                devices: vec![0, 1],
+                tensor: true,
+                one_pass,
+                ..Placement::default()
+            };
+            CudaModel::load_with(&model, LONG + 8, placement).map(|gpu| long_prompt(&gpu))
+        };
+        match (split(true), split(false)) {
+            (Ok(one), Ok(two)) => {
+                assert_rms_close(
+                    &floats(&one.0),
+                    &floats(&whole_long.0),
+                    "long hidden over two",
+                );
+                assert!(one == two, "two passes at once change the results");
+            }
+            (Err(e), _) | (_, Err(e)) => eprintln!("not split by tensors over two: {e}"),
+        }
+    }
+
     // Half the layers on the host, as when the device is too small.
     let layers = model.n_layers();
     let placement = Placement {
@@ -93,6 +139,36 @@ fn batches_and_rollbacks_change_no_bit() {
     assert!(capped.host_layers() > 0 && capped.host_layers() < layers);
     assert!(capped.weight_bytes() <= full / 2);
     a_batch_matches_token_by_token(&capped);
+}
+
+fn floats(bits: &[u32]) -> Vec<f32> {
+    bits.iter().map(|&b| f32::from_bits(b)).collect()
+}
+
+/// Fails unless `x` is within a small fraction of `y`'s largest value of it.
+fn assert_close(x: &[f32], y: &[f32], what: &str) {
+    assert_eq!(x.len(), y.len(), "{what}");
+    let scale = y.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let worst = x.iter().zip(y).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    eprintln!("{what}: largest difference {worst} against values up to {scale}");
+    assert!(worst <= 0.05 * scale, "{what}: {worst} against {scale}");
+}
+
+/// Fails unless the differences of `x` from `y` over all values, as a root
+/// mean square, are within a small fraction of `y`'s. For many rows of
+/// hidden states, where one value far off in one row says less than how
+/// far off they are together; products on tensor cores move single values
+/// more.
+fn assert_rms_close(x: &[f32], y: &[f32], what: &str) {
+    assert_eq!(x.len(), y.len(), "{what}");
+    let diff: f64 = x.iter().zip(y).map(|(a, b)| f64::from(a - b).powi(2)).sum();
+    let size: f64 = y.iter().map(|b| f64::from(*b).powi(2)).sum();
+    let rms = (diff / size).sqrt();
+    eprintln!(
+        "{what}: relative RMS difference {rms:.5} over {} values",
+        y.len()
+    );
+    assert!(rms <= 0.02, "{what}: relative RMS difference {rms}");
 }
 
 /// Tokens of the long prompt: more than two full prefill batches.

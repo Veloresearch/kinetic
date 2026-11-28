@@ -18,6 +18,7 @@ const RENAMED: &[(&str, &str)] = &[
     ("-hf", "--hf-repo"),
     ("-hfr", "--hf-repo"),
     ("-hff", "--hf-file"),
+    ("-sm", "--split-mode"),
 ];
 
 /// llama.cpp's spellings of how many layers go to the GPU: zero means the
@@ -68,8 +69,6 @@ const FLASH_ATTN_VALUES: &[&str] = &["on", "off", "auto", "true", "false", "1", 
 const UNSUPPORTED: &[(&[&str], &str)] = &[
     (
         &[
-            "-sm",
-            "--split-mode",
             "-ts",
             "--tensor-split",
             "-mg",
@@ -77,7 +76,7 @@ const UNSUPPORTED: &[(&[&str], &str)] = &[
             "-ot",
             "--override-tensor",
         ],
-        "Kinetic splits a model by layers only; choose the device with --device, and spread the layers over several CUDA GPUs with --gpus 0,1",
+        "Kinetic shares a model out evenly by free memory; choose the device with --device, spread the layers over several CUDA GPUs with --gpus 0,1, and split every layer over two with --split-mode row",
     ),
     (
         &[
@@ -362,6 +361,10 @@ mod tests {
         assert_eq!(
             translate(args(&["serve", "m.gguf", "-np", "4"])).unwrap(),
             args(&["serve", "m.gguf", "--parallel", "4"])
+        );
+        assert_eq!(
+            translate(args(&["serve", "m.gguf", "--gpus", "0,1", "-sm", "row"])).unwrap(),
+            args(&["serve", "m.gguf", "--gpus", "0,1", "--split-mode", "row"])
         );
     }
 }

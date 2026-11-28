@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 use crate::tech::Tech;
 use crate::{
     library, with_engine, CacheType, Device, OffArg, Result, RopeArgs, RopeKind, RuntimeArgs,
+    SplitMode,
 };
 
 /// What receipts made with this engine record: the model at `path`, run on
@@ -76,6 +77,10 @@ fn settings(kind: Device, runtime: &RuntimeArgs, context: usize) -> Map<String, 
     if let Some(n) = runtime.gpu_layers {
         s.insert("gpu-layers".into(), n.into());
     }
+    // a split of every layer adds its partial outputs in its own order
+    if kind == Device::Cuda && runtime.split_mode == SplitMode::Row {
+        s.insert("split-mode".into(), flag_value(SplitMode::Row));
+    }
     let rope = &runtime.rope;
     if let Some(k) = rope.rope_scaling {
         s.insert("rope-scaling".into(), flag_value(k));
@@ -128,6 +133,7 @@ fn rerun_runtime(
             CacheType::from_str(&v, true).map_err(|e| format!("{flag}: {e}").into())
         })
     };
+    let row = parse("split-mode").is_some_and(|v| v == "row");
     let class = &r.device.class;
     let device = device.unwrap_or(if class.starts_with("cuda") {
         Device::Cuda
@@ -147,9 +153,17 @@ fn rerun_runtime(
         device,
         gpu_layers: int("gpu-layers"),
         // which GPUs hold the layers does not change the bits, nor does the
-        // memory left free beside them
-        gpus: Vec::new(),
+        // memory left free beside them, but splitting every layer over two
+        // does
+        gpus: match row {
+            true => vec![0, 1],
+            false => Vec::new(),
+        },
         gpu_reserve: None,
+        split_mode: match row {
+            true => SplitMode::Row,
+            false => SplitMode::Layer,
+        },
         cache_dir: None,
         no_prompt_cache: true,
         cache_spacing: 256,

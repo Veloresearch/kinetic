@@ -141,7 +141,7 @@ A real receipt, signed:
 |---|---|
 | `kinetic` | the version, and the build: the first 16 hex digits of the BLAKE3 of the `kinetic` executable, which pins every kernel compiled into it |
 | `model` | the model file's name, path, size and BLAKE3; the hash is cached by path, size and modification time in `kinetic/hashes.json` in the user's cache directory, so a large file is hashed once |
-| `device` | the device class that decides the bits (`cpu-x86_64-avx2`, `cpu-x86_64-scalar`, `cuda-sm86`, `vulkan-<GPU>`), its name, and load settings that change the bits: the context size, a quantized CUDA cache, `--gpu-layers`, rotary overrides, and `coopmat` when Vulkan prompts ran on the matrix units |
+| `device` | the device class that decides the bits (`cpu-x86_64-avx2`, `cpu-x86_64-scalar`, `cuda-sm86`, `vulkan-<GPU>`), its name, and load settings that change the bits: the context size, a quantized CUDA cache, `--gpu-layers`, `--split-mode row`, rotary overrides, and `coopmat` when Vulkan prompts ran on the matrix units |
 | `input` | the chat messages or the prompt text, as sent |
 | `prompt` | the exact tokens the model was given, with their count and BLAKE3 |
 | `sampling` | every sampler setting: temperature, top-k, top-p, min-p, typical-p, top-n-sigma, the repeat, presence and frequency penalties, logit bias, XTC, DRY with its sequence breakers, Mirostat; the seed, the token limit, stop strings and any grammar or `response_format` |

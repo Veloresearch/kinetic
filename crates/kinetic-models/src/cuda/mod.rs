@@ -40,6 +40,7 @@ mod short_conv;
 mod split;
 mod staging;
 mod target;
+mod tensor;
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -47,8 +48,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use kinetic_cuda::{
-    Batch, Context, Device, DeviceBuffer, DeviceMatrix, Event, Graph, Kernels, KvType,
-    PinnedBuffer, Stream, MAX_BATCH,
+    Batch, Context, Courier, Device, DeviceBuffer, DeviceMatrix, Event, Graph, Kernels, KvType,
+    Mailbox, PinnedBuffer, Stream, EXCHANGE_BLOCKS, MAX_BATCH,
 };
 
 use crate::blocks::{Folding, Moe};
@@ -66,6 +67,7 @@ use pass::{PassRows, PASS_ROWS};
 use per_layer::{CudaLayerInput, CudaPerLayer};
 use scratch::{Scratch, Spare, Work};
 use staging::Staging;
+use tensor::Part;
 
 pub use experts::{Plan, PoolPlan, Stats};
 pub use host::CudaRunner;
@@ -116,6 +118,9 @@ struct Gpu {
     /// Recorded once this device has copied what another handed it over,
     /// which that device waits for before it overwrites the source.
     copied: Event,
+    /// Recorded after a layer's mixer in the first of two prompt passes in
+    /// flight, which the second waits for before it runs the same mixer.
+    mixed: Event,
     /// How attention caches store keys and values.
     cache: [KvType; 2],
     /// The weights uploaded expanded, for the line said after loading.
@@ -148,6 +153,7 @@ impl Gpu {
             join: Event::new(&ctx)?,
             handoff: Event::new(&ctx)?,
             copied: Event::new(&ctx)?,
+            mixed: Event::new(&ctx)?,
             cache: [KvType::F16; 2],
             expanded: Expanded::default(),
             reserve: 0,
@@ -215,8 +221,12 @@ pub struct CudaModel<'m> {
     layers: Vec<CudaLayer>,
     /// Runs `layers` in a model whose layers do not run one after another.
     network: Option<CudaNetwork>,
-    /// The layers after `layers`, on further devices in turn.
+    /// The layers after `layers`, on further devices in turn; or, with
+    /// `tensor`, the other devices' shares of every layer.
     shards: Vec<Shard>,
+    /// Whether every layer is split over the devices, rather than each
+    /// device running a run of whole layers; see [`tensor`].
+    tensor: bool,
     per_layer: Option<CudaPerLayer>,
     /// Most tokens one pass runs.
     rows: usize,
@@ -236,6 +246,9 @@ pub struct CudaModel<'m> {
     /// The state the expert cache was placed around, which the first
     /// [`CudaModel::new_state`] hands out.
     planned: RefCell<Option<CudaState>>,
+    /// A second prompt pass in flight beside the first, in a model split by
+    /// tensors over distinct devices; see [`tensor::Overlap`].
+    overlap: Option<tensor::Overlap>,
     /// The last shared one-token pass recorded, and the states it runs.
     shared_step: RefCell<Option<(Vec<u64>, Graph)>>,
     /// See [`Placement::eager`].
@@ -261,8 +274,8 @@ pub struct CudaState {
     pos: usize,
     checkpoint: Option<usize>,
     work: Work,
-    /// The recorded one-token step, made on first use.
-    step: Option<Step>,
+    /// The recorded short passes, each made on first use.
+    steps: Vec<Step>,
     /// Tells states apart in the recorded shared passes.
     id: u64,
     /// Host copies of recurrent layers at earlier lengths, for the warm
@@ -286,9 +299,22 @@ impl CudaState {
     }
 }
 
-/// A recorded one-token step and the host buffers it leaves its greedy
-/// token and hidden state in.
+/// Recorded passes a state keeps at most; the oldest goes first.
+const MAX_STEPS: usize = 48;
+
+/// What a recorded pass runs: its rows, how it treats recurrent state and
+/// the rows given to the head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StepKey {
+    rows: usize,
+    flow: Flow,
+    head: (usize, usize),
+}
+
+/// A recorded pass of up to [`MAX_BATCH`] tokens and the host buffers it
+/// leaves its greedy tokens and hidden states in.
 struct Step {
+    key: StepKey,
     /// One graph on one device; over several devices, one per device in
     /// turn and the head's last, which [`CudaModel::launch_step`] runs with
     /// the hand-overs between them. A graph never spans devices: drivers
@@ -306,6 +332,19 @@ struct Output {
     hidden: Vec<f32>,
     /// Logits of each row given to the head, when asked for.
     logits: Vec<f32>,
+}
+
+/// Why a split in every layer cannot run over two GPUs without direct
+/// access to each other's memory.
+fn no_peer_access() -> String {
+    let why = match kinetic_cuda::peer_access_allowed() {
+        true => "the driver does not offer it for these GPUs",
+        false => "KINETIC_CUDA_P2P turns it off",
+    };
+    format!(
+        "--split-mode row needs the two GPUs to read and write each other's memory \
+         directly, and {why}; --split-mode layer splits the model by layers instead"
+    )
 }
 
 fn cuda_error(e: kinetic_cuda::Error) -> LoadError {
@@ -367,6 +406,34 @@ impl<'m> CudaModel<'m> {
         if !others.is_empty() {
             check_splits(model, moes.is_some())?;
         }
+        let tensor = placement.tensor;
+        if tensor && others.len() != 1 {
+            return Err(LoadError(
+                "splitting every layer works over two GPUs for now; name them in --gpus, such as 0,1"
+                    .into(),
+            ));
+        }
+        if tensor && placement.gpu_layers.is_some() {
+            return Err(LoadError(
+                "a model split in every layer runs wholly on the GPUs; --gpu-layers does not apply"
+                    .into(),
+            ));
+        }
+        // The halves of a split layer write their partial sums and flags
+        // straight into each other's memory.
+        if tensor {
+            for (g, _) in &others {
+                let both = gpu.ctx.enable_peer_access(&g.ctx).map_err(cuda_error)?
+                    && g.ctx.enable_peer_access(&gpu.ctx).map_err(cuda_error)?;
+                if !both {
+                    return Err(LoadError(no_peer_access()));
+                }
+            }
+        }
+        let one_device = tensor
+            && others
+                .iter()
+                .any(|(g, _)| g.ctx.device() == gpu.ctx.device());
         let tied = std::ptr::eq(model.output.data, model.embd.data);
         let output = (!tied)
             .then(|| gpu.matrix(&model.output))
@@ -429,6 +496,28 @@ impl<'m> CudaModel<'m> {
                 };
                 (embd, 0, layers)
             }
+            None if tensor => {
+                // A row per token comes from the host instead: the main
+                // device has the head and any prediction block besides.
+                let embd = match tied {
+                    true => Embeddings::Device(table()?),
+                    false => Embeddings::Host,
+                };
+                let ranks = others.len() + 1;
+                let upload = |g: &Gpu, rank: usize| -> Result<Vec<CudaLayer>, LoadError> {
+                    let part = Part { rank, ranks };
+                    model
+                        .layers
+                        .iter()
+                        .map(|l| CudaLayer::upload(g, l, None, model.eps, part))
+                        .collect()
+                };
+                let main = upload(&gpu, 0)?;
+                for (k, (g, _)) in others.iter().enumerate() {
+                    shard_layers.push(upload(g, k + 1)?);
+                }
+                (embd, 0, main)
+            }
             None => {
                 let vocab = model.output.rows;
                 let embd = Embeddings::Device(table()?);
@@ -454,7 +543,7 @@ impl<'m> CudaModel<'m> {
                 (embd, placed.front, placed.main)
             }
         };
-        let shards = make_shards(&gpu, others, shard_layers, model)?;
+        let shards = make_shards(&gpu, others, shard_layers, model, tensor)?;
         let mut layers = layers;
         if let Some(p) = &model.per_layer {
             if front > 0 {
@@ -491,6 +580,7 @@ impl<'m> CudaModel<'m> {
             layers,
             network,
             shards,
+            tensor,
             per_layer,
             rows,
             prefill,
@@ -502,8 +592,12 @@ impl<'m> CudaModel<'m> {
             convoy: Convoy::for_device(),
             spare: None,
             planned: RefCell::new(None),
+            overlap: None,
             shared_step: RefCell::new(None),
-            eager: placement.eager,
+            // Both halves of a split on one device exchange through the copy
+            // engines, which graphs cannot hold across their streams; see
+            // [`CudaModel::one_device`].
+            eager: placement.eager || one_device,
             unrecorded: Cell::new(false),
             staging: RefCell::new(None),
         };
@@ -526,6 +620,7 @@ impl<'m> CudaModel<'m> {
                 let mtp = cuda.mtp.as_mut().expect("a prediction block");
                 mtp.spare = Some(RefCell::new(Spare::new(spare)));
             }
+            cuda.overlap = cuda.new_overlap(placement.one_pass).map_err(cuda_error)?;
         }
         if let Some(line) = cuda.gpu.expanded.report() {
             eprintln!("{line}");
@@ -694,7 +789,7 @@ impl<'m> CudaModel<'m> {
             pos: 0,
             checkpoint: None,
             work,
-            step: None,
+            steps: Vec::new(),
             id: lanes::next_id(),
             marks: Vec::new(),
         })
@@ -719,7 +814,7 @@ impl<'m> CudaModel<'m> {
         for shard in &self.shards {
             let layers: Vec<&CudaLayer> = shard.layers.iter().collect();
             // no head there; the batch comes over whole, grid and all
-            let w = Work::new(
+            let mut w = Work::new(
                 &shard.gpu,
                 &layers,
                 d,
@@ -729,7 +824,21 @@ impl<'m> CudaModel<'m> {
                 0,
                 self.folded,
             )?;
+            if self.tensor {
+                w.scratch.courier = Some(Courier::new(&shard.gpu.ctx, rows * d)?);
+                if !self.one_device() {
+                    let mailbox = Mailbox::new(&shard.gpu.ctx, rows * d, EXCHANGE_BLOCKS)?;
+                    w.scratch.mailbox = Some(mailbox);
+                }
+            }
             work.shards.push(w);
+        }
+        if self.tensor {
+            work.scratch.courier = Some(Courier::new(&self.gpu.ctx, rows * d)?);
+            if !self.one_device() {
+                let mailbox = Mailbox::new(&self.gpu.ctx, rows * d, EXCHANGE_BLOCKS)?;
+                work.scratch.mailbox = Some(mailbox);
+            }
         }
         if self.host.grid_rope {
             work.batch.use_grid();
@@ -907,13 +1016,13 @@ impl<'m> CudaModel<'m> {
         };
         let mut spare = spare.borrow_mut();
         // the decode graph reads the state's own buffers
-        let step = state.step.take();
+        let steps = std::mem::take(&mut state.steps);
         let shift = state.work.batch.grid_shift();
         spare.swap(&mut state.work);
         state.work.batch.set_grid_shift(shift);
         let out = self.forward_rows(state, tokens, all_rows, logits);
         spare.swap(&mut state.work);
-        state.step = step;
+        state.steps = steps;
         out
     }
 
@@ -958,11 +1067,29 @@ impl<'m> CudaModel<'m> {
             s.reset()?;
         }
         let mut done = 0;
-        let chunks: Vec<&[u32]> = match whole {
-            true => vec![tokens],
-            false => batches(tokens, state.pos, since.is_none(), self.batch_rows()).collect(),
+        let paired = self.overlap.is_some() && since.is_none() && !all_rows && !whole;
+        let chunks: Vec<&[u32]> = match (whole, paired) {
+            (true, _) => vec![tokens],
+            (false, true) => paired_batches(tokens, state.pos, self.batch_rows()),
+            (false, false) => {
+                batches(tokens, state.pos, since.is_none(), self.batch_rows()).collect()
+            }
         };
-        for chunk in chunks {
+        let mut at = 0;
+        while at < chunks.len() {
+            // Two passes that read no logits run at once where they can.
+            if let Some(o) = &self.overlap {
+                if since.is_none() && !all_rows && at + 2 < chunks.len() {
+                    let (a, b) = (chunks[at], chunks[at + 1]);
+                    let hidden = &mut out.hidden[done * d..][..(a.len() + b.len()) * d];
+                    self.run_pair(state, o, a, b, hidden)?;
+                    done += a.len() + b.len();
+                    at += 2;
+                    continue;
+                }
+            }
+            let chunk = chunks[at];
+            at += 1;
             let n = chunk.len();
             let last = done + n == tokens.len();
             let head = match (all_rows, last) {
@@ -979,19 +1106,30 @@ impl<'m> CudaModel<'m> {
             state.work.batch.set(state.pos, chunk, &self.gpu.stream)?;
             // Experts routed on the host read their routing back, which a
             // graph cannot; embeddings read on the host are copied before.
-            let recorded = flow == Flow::Commit
-                && n == 1
-                && head.is_some()
+            let key = head.as_ref().map(|h| StepKey {
+                rows: n,
+                flow,
+                head: (h.start, h.end),
+            });
+            let recorded = n <= MAX_BATCH
+                && key.is_some()
                 && !self.routes_on_host()
                 && !self.eager
                 && !self.unrecorded.get();
             let embed_on_device = self.front == 0 && matches!(self.embd, Embeddings::Device(_));
-            if recorded && state.step.is_none() {
-                match self.record_step(&mut state.work, chunk, embed_on_device) {
-                    Ok(step) => state.step = Some(step),
+            let found = |state: &CudaState| state.steps.iter().position(|s| Some(s.key) == key);
+            if recorded && found(state).is_none() {
+                let key = key.expect("recorded passes have a head");
+                match self.record_step(&mut state.work, chunk, key, embed_on_device) {
+                    Ok(step) => {
+                        if state.steps.len() == MAX_STEPS {
+                            state.steps.remove(0);
+                        }
+                        state.steps.push(step);
+                    }
                     // perf: a driver that cannot record across devices
                     // still runs the step, a launch per kernel
-                    Err(e) if !self.shards.is_empty() => {
+                    Err(e) if !self.shards.is_empty() || n > 1 => {
                         eprintln!(
                             "kinetic: recording decode steps across GPUs failed ({e}); running them kernel by kernel"
                         );
@@ -1000,19 +1138,20 @@ impl<'m> CudaModel<'m> {
                     Err(e) => return Err(e),
                 }
             }
-            if recorded && state.step.is_some() {
+            let found = found(state).filter(|_| recorded);
+            if let Some(at) = found {
                 if !embed_on_device {
                     self.embed(&mut state.work, chunk)?;
                 }
-                if let Some(step) = &state.step {
-                    self.launch_step(step, &mut state.work)?;
-                    self.gpu.stream.synchronize()?;
-                    out.greedy.extend_from_slice(step.greedy.as_slice());
-                    out.hidden[done * d..][..d].copy_from_slice(step.hidden.as_slice());
-                }
+                let step = &state.steps[at];
+                let m = step.key.head.1 - step.key.head.0;
+                self.launch_step(step, &mut state.work)?;
+                self.gpu.stream.synchronize()?;
+                out.greedy.extend_from_slice(&step.greedy.as_slice()[..m]);
+                out.hidden[done * d..][..n * d].copy_from_slice(&step.hidden.as_slice()[..n * d]);
                 if logits {
                     let start = out.logits.len();
-                    out.logits.resize(start + self.n_vocab(), 0.0);
+                    out.logits.resize(start + m * self.n_vocab(), 0.0);
                     state
                         .work
                         .scratch
@@ -1020,7 +1159,7 @@ impl<'m> CudaModel<'m> {
                         .copy_range_to(0, &mut out.logits[start..])?;
                     self.host.cap(&mut out.logits[start..]);
                 }
-            } else if head.is_none() && !self.shards.is_empty() {
+            } else if head.is_none() && !self.shards.is_empty() && !self.tensor {
                 // The rows go to the host from the last shard, and the main
                 // device moves on to the next pass.
                 self.embed(&mut state.work, chunk)?;
@@ -1068,37 +1207,86 @@ impl<'m> CudaModel<'m> {
         Ok(out)
     }
 
-    /// Records the one-token step over the batch in `work`, which holds
-    /// `token`, from its embedding on the device or from the embedding in
-    /// the scratch.
+    /// Runs the batches `a` and `b`, which read no logits, as two passes in
+    /// flight, and writes their hidden rows to `hidden`.
+    fn run_pair(
+        &self,
+        state: &mut CudaState,
+        overlap: &tensor::Overlap,
+        a: &[u32],
+        b: &[u32],
+        hidden: &mut [f32],
+    ) -> kinetic_cuda::Result<()> {
+        let mut spare = overlap.spare.borrow_mut();
+        let shift = state.work.batch.grid_shift();
+        state.work.batch.set(state.pos, a, &self.gpu.stream)?;
+        self.embed(&mut state.work, a)?;
+        spare.swap(&mut state.work);
+        state.work.batch.set_grid_shift(shift);
+        let embedded = state
+            .work
+            .batch
+            .set(state.pos + a.len(), b, &self.gpu.stream)
+            .and_then(|()| self.embed(&mut state.work, b));
+        spare.swap(&mut state.work);
+        embedded?;
+        self.queue_pair(&mut state.work, &mut spare, Flow::Commit)?;
+        let (first, second) = hidden.split_at_mut(a.len() * self.n_embd);
+        state.work.scratch.h.values().copy_range_to(0, first)?;
+        spare.swap(&mut state.work);
+        let copied = state.work.scratch.h.values().copy_range_to(0, second);
+        spare.swap(&mut state.work);
+        copied?;
+        state.pos += a.len() + b.len();
+        Ok(())
+    }
+
+    /// Records the pass `key` says over the batch in `work`, which holds
+    /// `tokens`, from their embeddings on the device or from those in the
+    /// scratch.
     fn record_step(
         &self,
         work: &mut Work,
-        token: &[u32],
+        tokens: &[u32],
+        key: StepKey,
         embed_on_device: bool,
     ) -> kinetic_cuda::Result<Step> {
         let stream = &self.gpu.stream;
-        let mut greedy = PinnedBuffer::new(&self.gpu.ctx, 1)?;
-        let mut hidden = PinnedBuffer::new(&self.gpu.ctx, self.n_embd)?;
+        let (n, flow, (lo, hi)) = (key.rows, key.flow, key.head);
+        let mut greedy = PinnedBuffer::new(&self.gpu.ctx, hi - lo)?;
+        let mut hidden = PinnedBuffer::new(&self.gpu.ctx, n * self.n_embd)?;
         let mut head = |work: &mut Work| {
             let s = &mut work.scratch;
-            self.queue_head(s, 0..1)?;
+            self.queue_head(s, lo..hi)?;
             // SAFETY: the step owns both buffers with its graphs, and they
             // are read only after the stream has passed each launch.
             unsafe {
-                greedy.download(0, s.greedy.best(), 0..1, stream)?;
-                hidden.download(0, s.h.values(), 0..self.n_embd, stream)
+                greedy.download(0, s.greedy.best(), 0..hi - lo, stream)?;
+                hidden.download(0, s.h.values(), 0..n * self.n_embd, stream)
             }
         };
+        if self.tensor {
+            let mut shards = std::mem::take(&mut work.shards);
+            let graphs =
+                self.record_parts(work, &mut shards, tokens, flow, embed_on_device, &mut head);
+            work.shards = shards;
+            return Ok(Step {
+                key,
+                graphs: graphs?,
+                greedy,
+                hidden,
+            });
+        }
         if self.shards.is_empty() {
             let graph = stream.capture(|| {
                 if embed_on_device {
-                    self.embed(work, token)?;
+                    self.embed(work, tokens)?;
                 }
-                self.queue_layers(work, Flow::Commit)?;
+                self.queue_layers(work, flow)?;
                 head(work)
             })?;
             return Ok(Step {
+                key,
                 graphs: vec![graph],
                 greedy,
                 hidden,
@@ -1106,9 +1294,9 @@ impl<'m> CudaModel<'m> {
         }
         let mut graphs = vec![stream.capture(|| {
             if embed_on_device {
-                self.embed(work, token)?;
+                self.embed(work, tokens)?;
             }
-            self.queue_main(work, Flow::Commit)
+            self.queue_main(work, flow)
         })?];
         for (k, shard) in self.shards.iter().enumerate() {
             // queued now, outside the graph, so the shard's batch holds this
@@ -1118,12 +1306,13 @@ impl<'m> CudaModel<'m> {
                 shard
                     .gpu
                     .stream
-                    .capture(|| self.queue_shard(work, k, Flow::Commit))?,
+                    .capture(|| self.queue_shard(work, k, flow))?,
             );
         }
         self.hand_back(work)?;
         graphs.push(stream.capture(|| head(work))?);
         Ok(Step {
+            key,
             graphs,
             greedy,
             hidden,
@@ -1137,6 +1326,9 @@ impl<'m> CudaModel<'m> {
         let [main, rest @ ..] = step.graphs.as_slice() else {
             unreachable!("a step has a graph")
         };
+        if self.tensor {
+            return self.launch_parts(step, work);
+        }
         main.launch(stream)?;
         let Some((head, shards)) = rest.split_last() else {
             return Ok(());
@@ -1227,6 +1419,9 @@ impl<'m> CudaModel<'m> {
     /// the scratch: those of the main device, then those of each shard, the
     /// stream handed from device to device and its norm back for the head.
     fn queue_layers(&self, work: &mut Work, flow: Flow) -> kinetic_cuda::Result<()> {
+        if self.tensor {
+            return self.queue_tensor(work, flow);
+        }
         self.queue_main(work, flow)?;
         for k in 0..self.shards.len() {
             self.hand_to_shard(work, k)?;
@@ -1431,6 +1626,7 @@ fn make_shards(
     others: Vec<(Gpu, usize)>,
     layers: Vec<Vec<CudaLayer>>,
     model: &Model,
+    tensor: bool,
 ) -> Result<Vec<Shard>, LoadError> {
     let mut shards: Vec<Shard> = Vec::new();
     for ((gpu, _), layers) in others.into_iter().zip(layers) {
@@ -1438,6 +1634,7 @@ fn make_shards(
         let entry_norm = layers[0]
             .mixer_norm
             .as_ref()
+            .filter(|_| !tensor)
             .map(|w| w.to_vec().and_then(|v| prev.vector(&v)))
             .transpose()
             .map_err(cuda_error)?;
@@ -1471,7 +1668,7 @@ fn upload_experts_layers(gpu: &Gpu, model: &Model) -> Result<Vec<CudaLayer>, Loa
                     CudaExperts::upload(gpu, moe, next.map(|n| &n.router), l.ffn.is_some())
                 })
                 .transpose()?;
-            CudaLayer::upload(gpu, l, experts, model.eps)
+            CudaLayer::upload(gpu, l, experts, model.eps, Part::WHOLE)
         })
         .collect()
 }
@@ -1502,14 +1699,18 @@ fn batch_rows(kernels: &Kernels, context: usize, prefill: usize) -> usize {
 /// [`PREFILL_GRID`] that are too few for a batch of their own go in steps
 /// too, as a run of only them would take them.
 fn batches(tokens: &[u32], pos: usize, prefill: bool, rows: usize) -> impl Iterator<Item = &[u32]> {
+    let (head, tail) = tokens.split_at(prefill_len(tokens, pos, prefill));
+    head.chunks(rows).chain(tail.chunks(MAX_BATCH))
+}
+
+/// How many of `tokens`, after `pos` others, [`batches`] runs as prefill.
+fn prefill_len(tokens: &[u32], pos: usize, prefill: bool) -> usize {
     let tail = (pos + tokens.len() - 1) % PREFILL_GRID + 1;
-    let head = match prefill && tokens.len() >= PREFILL_FROM {
+    match prefill && tokens.len() >= PREFILL_FROM {
         true if tail < PREFILL_FROM => tokens.len() - tail,
         true => tokens.len(),
         false => 0,
-    };
-    let (head, tail) = tokens.split_at(head);
-    head.chunks(rows).chain(tail.chunks(MAX_BATCH))
+    }
 }
 
 /// Most rows a pass that verifies a draft runs whole on a device that runs
@@ -1534,6 +1735,55 @@ impl Drop for ExactRows<'_> {
         self.0.set_exact_rows(false);
     }
 }
+
+/// [`batches`] for a model that runs two passes at once, which it can for
+/// every pass but the last: a pass alone runs at about two thirds of the
+/// rate of two together, on two P100s. So when the prefill part ends the
+/// run, its last batch is only the last [`PREFILL_GRID`] or less, and the
+/// rest goes in pairs of near-equal batches of at most `rows`, cut on the
+/// grid. Batches below [`PAIRED_FROM`], and full pairs with less than
+/// that over, stay as [`batches`] cuts them.
+/// Results do not change, as they do not depend on where the grid cuts a
+/// prompt.
+fn paired_batches(tokens: &[u32], pos: usize, rows: usize) -> Vec<&[u32]> {
+    let len = prefill_len(tokens, pos, true);
+    if len < 2 * PAIRED_FROM {
+        return batches(tokens, pos, true, rows).collect();
+    }
+    // cuts at absolute multiples of the grid
+    let first = (pos.next_multiple_of(PREFILL_GRID) - pos).min(len);
+    let end = (pos + len) / PREFILL_GRID * PREFILL_GRID - pos;
+    let paired = match len < tokens.len() {
+        true => end,
+        // a last batch of at most the grid, read for the logits
+        false => (pos + len - 1) / PREFILL_GRID * PREFILL_GRID - pos,
+    };
+    // full pairs with little over run faster as they are than as more,
+    // smaller pairs
+    let over = paired.saturating_sub(first) % (2 * rows);
+    if paired >= 2 * rows && over < PAIRED_FROM {
+        return batches(tokens, pos, true, rows).collect();
+    }
+    let units = paired.saturating_sub(first) / PREFILL_GRID;
+    let count = 2 * paired.div_ceil(2 * rows);
+    let cut = |k: usize| match k {
+        0 => 0,
+        k => first + (k * (units / count) + k.min(units % count)) * PREFILL_GRID,
+    };
+    if units < count || (0..count).any(|k| !(PAIRED_FROM..=rows).contains(&(cut(k + 1) - cut(k)))) {
+        return batches(tokens, pos, true, rows).collect();
+    }
+    let mut out: Vec<&[u32]> = (0..count).map(|k| &tokens[cut(k)..cut(k + 1)]).collect();
+    if cut(count) < len {
+        out.push(&tokens[cut(count)..len]);
+    }
+    out.extend(tokens[len..].chunks(MAX_BATCH));
+    out
+}
+
+/// Fewest tokens in a batch [`paired_batches`] cuts: two passes of fewer
+/// measured slower together than as one.
+const PAIRED_FROM: usize = 256;
 
 /// `rows` in runs of at most [`MAX_BATCH`].
 fn slices(rows: Range<usize>) -> impl Iterator<Item = Range<usize>> {
@@ -1586,4 +1836,51 @@ fn routed_experts<'m>(model: &Model<'m>) -> Result<Option<Vec<Moe<'m>>>, LoadErr
 
 fn shape(msg: String) -> kinetic_cuda::Error {
     kinetic_cuda::Error::Shape(msg)
+}
+
+#[cfg(test)]
+mod paired_tests {
+    use super::*;
+
+    #[test]
+    fn paired_batches_cover_the_prompt_on_the_grid_in_pairs() {
+        let tokens: Vec<u32> = (0..9000).collect();
+        for pos in [0, 5, 32, 1000] {
+            for len in [
+                1, 20, 40, 100, 502, 1024, 1044, 1536, 1564, 2048, 2080, 2085, 3126, 4160, 4168,
+                8192,
+            ] {
+                let t = &tokens[..len];
+                let got = paired_batches(t, pos, 1024);
+                assert_eq!(got.concat(), t, "pos {pos} len {len}");
+                let plain: Vec<&[u32]> = batches(t, pos, true, 1024).collect();
+                let prefill = prefill_len(t, pos, true);
+                let mut at = pos;
+                let mut big = 0;
+                for b in &got {
+                    assert!(b.len() <= 1024, "pos {pos} len {len}");
+                    if at - pos < prefill && got != plain {
+                        big += 1;
+                        let end = at + b.len();
+                        assert!(
+                            end % PREFILL_GRID == 0 || end == pos + prefill,
+                            "pos {pos} len {len}"
+                        );
+                    }
+                    at += b.len();
+                }
+                // cut anew only into pairs and, ending the run, a last
+                // batch within the grid
+                if got != plain {
+                    let steps_follow = prefill < len;
+                    let lone = usize::from(!steps_follow);
+                    assert!(big >= 2 + lone, "pos {pos} len {len}");
+                    assert_eq!(big % 2, lone, "pos {pos} len {len}");
+                    if !steps_follow {
+                        assert!(got[big - 1].len() <= PREFILL_GRID, "pos {pos} len {len}");
+                    }
+                }
+            }
+        }
+    }
 }
