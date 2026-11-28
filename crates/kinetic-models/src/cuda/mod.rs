@@ -593,7 +593,9 @@ impl<'m> CudaModel<'m> {
     fn expert_work(&self, moes: &[Moe]) -> kinetic_cuda::Result<ExpertWork> {
         let dims = experts::ExpertDims {
             d: self.n_embd,
-            rows: PASS_ROWS,
+            // a network model routes a whole batch at once, which is 1024
+            // tokens on GPUs without tensor cores
+            rows: PASS_ROWS.max(self.batch_rows()),
             picks: moes[0].n_used,
             n_ff: moes.iter().map(|m| m.gate.rows).max().unwrap_or(0),
             scores: self
