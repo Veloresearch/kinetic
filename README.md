@@ -573,6 +573,7 @@ Examples: [Python, C and Rust](https://veloresearch.github.io/kinetic/bindings.h
 | Gemma 4 | `gemma4` | E2B and E4B with images, 12B and 31B; the 26B A4B mixture of experts on the CPU |
 | Qwen3, Qwen2.5 | `qwen3`, `qwen2` | thinking and tool calls |
 | Llama 3, Mistral, Mistral Nemo, SmolLM2 | `llama` | |
+| Microsoft Phi-3 Mini 4K Instruct | `phi3` | Microsoft's Q4_K_M GGUF; use `--device cpu` for the tested configuration. CUDA and 128K are not supported |
 | Gemma 3 | `gemma3` | |
 | LFM3, LFM2 | `lfm3`, `lfm2` | convolution and attention |
 | Granite 3 and 4.0 | `granite`, `granitehybrid`, `granitemoe` | dense, hybrid, MoE |

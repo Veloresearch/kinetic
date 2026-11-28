@@ -196,8 +196,8 @@ impl<'a> Engine<'a> {
         };
         let (bos, eos) = (text(tokenizer.bos()), text(tokenizer.eos()));
 
-        let mut stop_tokens: Vec<u32> = tokenizer.eos().into_iter().collect();
-        for marker in END_OF_TURN {
+        let mut stop_tokens = tokenizer.stop_tokens();
+        for &marker in END_OF_TURN {
             let ids = tokenizer.encode(marker, true);
             let ids: Vec<u32> = ids
                 .into_iter()

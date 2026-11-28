@@ -46,3 +46,4 @@ then add its row here and its digest with
 | `inkling2-loop.gguf` | [ggml-org/Inkling-2-Mini-GGUF](https://huggingface.co/ggml-org/Inkling-2-Mini-GGUF) | `Inkling-2-Mini-Q8_0.gguf` | `e8a2cecf0e78914f07cc27b9be711a9b2c7561d9` |
 | `inkling2.gguf` | [unsloth/Inkling-2-Mini-GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) | `Inkling-2-Mini-UD-Q4_K_M.gguf` | `800c946d7b9c830c86290df49afbbe91db8455f5` |
 | `mistral-nemo.gguf` | [MaziyarPanahi/Mistral-Nemo-Instruct-2407-GGUF](https://huggingface.co/MaziyarPanahi/Mistral-Nemo-Instruct-2407-GGUF) | `Mistral-Nemo-Instruct-2407.Q4_K_M.gguf` | `eba4e7492de28b8ab2ff44b0bb819004181b3db4` |
+| `phi3.gguf` | [microsoft/Phi-3-mini-4k-instruct-gguf](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf) | `Phi-3-mini-4k-instruct-q4.gguf` | `a64113399c2f6b8ad3e11c394733a2ddadaa7f33` |

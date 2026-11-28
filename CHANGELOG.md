@@ -6,6 +6,11 @@ the rules in [Versioning](https://veloresearch.github.io/kinetic/versioning.html
 
 ## [Unreleased]
 
+### Models
+
+- Microsoft Phi-3 Mini 4K Instruct (`phi3`) on the CPU, tested with
+  Microsoft's Q4_K_M GGUF. The 128K variant is not supported.
+
 ## [0.1.1] - 2026-11-27
 
 Inkling 2 Mini on NVIDIA and AMD GPUs, also on cards with 6 GB, macOS on

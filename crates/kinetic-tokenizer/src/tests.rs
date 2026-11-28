@@ -282,6 +282,30 @@ fn special_tokens_split_the_text() {
 }
 
 #[test]
+fn special_tokens_trim_only_following_ascii_whitespace() {
+    let mut specials = Specials::new([("<ctrl>".into(), 1, true), ("[tag]".into(), 2, false)]);
+    specials.trim_after(|_| true);
+    let text = "a <ctrl>\t\n\x0b\x0c\r [tag] \u{00a0}\nb";
+    assert_eq!(
+        specials.split(text, true),
+        [
+            Segment::Text("a "),
+            Segment::Token(1),
+            Segment::Token(2),
+            Segment::Text("\u{00a0}\nb"),
+        ]
+    );
+    assert_eq!(
+        specials.split(text, false),
+        [
+            Segment::Text("a <ctrl>\t\n\x0b\x0c\r "),
+            Segment::Token(2),
+            Segment::Text("\u{00a0}\nb"),
+        ]
+    );
+}
+
+#[test]
 fn bos_follows_the_model_flag() {
     let with_bos = Builder::new("lfm2")
         .token("<s>", 3)
@@ -418,6 +442,44 @@ fn sentencepiece_space_prefix_can_be_turned_off() {
     );
     assert_eq!(tok.encode("a a", false), [4, 5]);
     assert_eq!(tok.encode("", false), []);
+}
+
+#[test]
+fn stop_tokens_add_legacy_marker_only_for_phi3() {
+    let build = |arch: &str| {
+        sentencepiece(
+            &[("<|end|>", 4, 0.0)],
+            vec![
+                ("general.architecture".into(), Value::String(arch.into())),
+                ("tokenizer.ggml.eos_token_id".into(), Value::U32(3)),
+            ],
+        )
+    };
+    assert_eq!(build("phi3").stop_tokens(), [3, 2]);
+    assert_eq!(build("llama").stop_tokens(), [3]);
+}
+
+#[test]
+fn phi3_trims_whitespace_only_after_selected_special_tokens() {
+    let tokens = [
+        ("<|endoftext|>", 4, 0.0),
+        ("\u{2581}", 1, -1.0),
+        ("a", 1, -2.0),
+        ("\u{2581}a", 1, -0.5),
+        ("<0x0A>", 6, 0.0),
+    ];
+    let build = |arch: &str| {
+        sentencepiece(
+            &tokens,
+            vec![("general.architecture".into(), Value::String(arch.into()))],
+        )
+    };
+    let phi3 = build("phi3");
+    assert_eq!(phi3.encode("</s>\na", true), [1, 2, 6]);
+    assert_eq!(phi3.encode("<unk>\na", true), [1, 0, 4, 7, 5]);
+    assert_eq!(phi3.encode("<s>\na", true), [1, 1, 4, 7, 5]);
+    assert_eq!(phi3.encode("<|endoftext|>\na", true), [1, 3, 4, 7, 5]);
+    assert_eq!(build("llama").encode("</s>\na", true), [1, 2, 4, 7, 5]);
 }
 
 #[test]

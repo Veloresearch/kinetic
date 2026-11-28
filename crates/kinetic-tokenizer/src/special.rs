@@ -13,6 +13,7 @@ struct Special {
     /// Control tokens are only recognised when special parsing is on;
     /// user-defined tokens always are.
     control: bool,
+    trim_after: bool,
 }
 
 pub(crate) struct Specials {
@@ -32,6 +33,7 @@ impl Specials {
                 text: text.into(),
                 id,
                 control,
+                trim_after: false,
             })
             .collect();
         tokens.sort_by(|a, b| b.text.len().cmp(&a.text.len()).then(a.id.cmp(&b.id)));
@@ -42,6 +44,13 @@ impl Specials {
         Specials {
             tokens,
             by_first_byte,
+        }
+    }
+
+    /// Marks specials that consume the ASCII whitespace immediately after them.
+    pub(crate) fn trim_after(&mut self, select: impl Fn(&str) -> bool) {
+        for token in &mut self.tokens {
+            token.trim_after = select(&token.text);
         }
     }
 
@@ -81,12 +90,20 @@ impl Specials {
 
         let mut segments = Vec::with_capacity(2 * taken.len() + 1);
         let mut start = 0;
-        for (pos, i) in taken {
+        for (j, &(pos, i)) in taken.iter().enumerate() {
             if pos > start {
                 segments.push(Segment::Text(&text[start..pos]));
             }
-            segments.push(Segment::Token(self.tokens[i].id));
-            start = pos + self.tokens[i].text.len();
+            let token = &self.tokens[i];
+            segments.push(Segment::Token(token.id));
+            start = pos + token.text.len();
+            if token.trim_after {
+                let end = taken.get(j + 1).map_or(text.len(), |&(pos, _)| pos);
+                start += bytes[start..end]
+                    .iter()
+                    .take_while(|&&b| matches!(b, b'\t'..=b'\r' | b' '))
+                    .count();
+            }
         }
         if start < text.len() {
             segments.push(Segment::Text(&text[start..]));

@@ -45,6 +45,7 @@ The names are the GGUF `general.architecture` values.
 | `lfm2` | LFM2 | yes | yes |
 | `lfm2moe` | LFM2.5 mixture of experts, such as 8B-A1B (experimental, slower than llama.cpp on CUDA for now) | yes | yes, also larger than GPU memory |
 | `llama` | Llama 3, Mistral, Mistral Nemo, SmolLM2 and other models built like Llama | yes | yes |
+| `phi3` | Microsoft Phi-3 Mini 4K Instruct (official Q4_K_M); use `--device cpu` for the tested configuration. 128K is not supported | yes | no |
 | `qwen2` | Qwen2.5 | yes | yes |
 | `qwen3` | Qwen3 | yes | yes |
 | `gemma3` | Gemma 3 | yes | yes |

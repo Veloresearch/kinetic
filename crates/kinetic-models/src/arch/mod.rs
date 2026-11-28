@@ -14,6 +14,7 @@ pub(crate) mod lfm2;
 pub(crate) mod lfm3;
 mod mamba;
 mod moe;
+pub(crate) mod phi3;
 pub(crate) mod qwen35;
 pub(crate) mod rope;
 pub(crate) mod transformer;
@@ -31,6 +32,7 @@ pub(crate) const FAMILIES: &[Family] = &[
     qwen35::FAMILY,
     lfm3::FAMILY,
     lfm2::FAMILY,
+    phi3::FAMILY,
     transformer::FAMILY,
     transformer::GEMMA3,
     gemma4::FAMILY,

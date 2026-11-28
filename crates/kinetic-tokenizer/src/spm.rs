@@ -72,7 +72,7 @@ impl PartialEq for Bigram {
 impl Eq for Bigram {}
 
 impl Spm {
-    pub(crate) fn load(gguf: &Gguf) -> Result<Spm, Error> {
+    pub(crate) fn load(gguf: &Gguf, trim_after: Option<fn(&str) -> bool>) -> Result<Spm, Error> {
         let (tokens, types) = vocab::tokens_and_types(gguf)?;
         let scores = match gguf.get("tokenizer.ggml.scores") {
             Some(v) => {
@@ -137,9 +137,13 @@ impl Spm {
             None => true,
         };
 
+        let mut specials = Specials::new(specials);
+        if let Some(trim_after) = trim_after {
+            specials.trim_after(trim_after);
+        }
         Ok(Spm {
             pieces,
-            specials: Specials::new(specials),
+            specials,
             ids,
             scores,
             byte_ids,
@@ -149,8 +153,11 @@ impl Spm {
     }
 
     /// [`Spm::load`] for a vocabulary that merges by `tokenizer.ggml.merges`.
-    pub(crate) fn load_with_merges(gguf: &Gguf) -> Result<Spm, Error> {
-        let mut spm = Spm::load(gguf)?;
+    pub(crate) fn load_with_merges(
+        gguf: &Gguf,
+        trim_after: Option<fn(&str) -> bool>,
+    ) -> Result<Spm, Error> {
+        let mut spm = Spm::load(gguf, trim_after)?;
         let rules = vocab::strings(gguf, "tokenizer.ggml.merges")?;
         let rules = (0u32..).zip(rules).filter_map(|(rank, rule)| {
             let (left, right) = vocab::split_merge(rule)?;
